@@ -1,2 +1,4 @@
 tests:
-  lmdb_dataset_path: "~/datasets/CIFAR/train100.lmdb"
+  lmdb_dataset_path: "~/datasets/CIFAR/lmdb_dataset.lmdb"
+lmdb_export:
+  lmdb_dataset_dir: "~/datasets/CIFAR/"

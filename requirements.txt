@@ -4,3 +4,4 @@ lmdb
 pytest
 munch
 pyyaml
+tqdm
