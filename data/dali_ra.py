@@ -1,3 +1,4 @@
+from functools import partial
 import io
 import os
 import pickle
@@ -6,37 +7,75 @@ import lmdb
 import numpy as np
 
 from nvidia.dali.pipeline import Pipeline
-import nvidia.dali.ops as ops
 import nvidia.dali.types as types
-#import nvidia.dali.fn as fn
+import nvidia.dali.fn as fn
+from nvidia.dali.plugin.pytorch import LastBatchPolicy
 
 class LMDBClassIter:
 
-    def __init__(self, path, batch_size, shuffle=True, shuffle_each_epoch=True, partial_batch=False):
+    def __init__(self, path, batch_size, shuffle=True, partial_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None):
         self.path = os.path.expanduser(path)
         self.batch_size = batch_size
         self.env = lmdb.open(self.path, subdir=os.path.isdir(self.path), readonly=True, lock=False, readahead=False, meminit=False)
         with self.env.begin(write=False) as txn:
-            self.length = pickle.loads(txn.get(b"__len__"))
+            self.length = pickle.loads(txn.get(b"__len__")) if sublist is None else len(sublist)
         self.shuffle = shuffle
-        self.shuffle_each_epoch = shuffle_each_epoch
-        self.partial_batch = partial_batch
-        if self.shuffle:
-            self.shuffle_indices = np.random.permutation(self.length)
+        self.sublist = sublist
+        self.partial_batch_policy = partial_batch_policy
+        self.last_batch_padded = last_batch_padded
+        self.raise_stop_after = False
+        
 
     def __iter__(self):
+        # print("Called __iter__")
         self.i = 0
+        self.raise_stop_after = False
+        if self.shuffle:
+            if self.sublist is not None:
+                self.shuffle_indices = np.random.permutation(self.sublist)
+            else:
+                self.shuffle_indices = np.random.permutation(self.length)
         return self
 
     def __next__(self):
+
+        if self.raise_stop_after or (self.i + self.batch_size - 1 >= self.length and self.partial_batch_policy == LastBatchPolicy.DROP):
+            if not self.last_batch_padded: 
+                start_index = self.length % self.batch_size # TODO: Check last_batch_padded_behavior
+                self.__iter__()
+                self.i = start_index
+            else:
+                self.__iter__()
+            # print("Raising StopIteration")
+            raise StopIteration
+
         batch = []
         labels = []
+
+        # print("Started iteration with start index: ", self.i)
+
         for _ in range(self.batch_size):
+
+            if self.i < self.length:
+                cur_index = self.i
+            elif self.partial_batch_policy == LastBatchPolicy.PARTIAL:
+                self.raise_stop_after = True
+                break
+            elif self.last_batch_padded:
+                self.raise_stop_after = True
+                cur_index = self.length - 1
+            else:
+                self.raise_stop_after = True
+                cur_index = self.i % self.length
+
+            if self.shuffle:
+                    cur_index = self.shuffle_indices[cur_index]
+            elif self.sublist is not None:
+                cur_index = self.sublist[cur_index]
+
             with self.env.begin(write=False) as txn:
-                if self.shuffle:
-                    byteflow = txn.get("{}".format(self.shuffle_indices[self.i]).encode("ascii"))
-                else:
-                    byteflow = txn.get("{}".format(self.i).encode("ascii"))
+                # print("Index: ", cur_index)
+                byteflow = txn.get("{}".format(cur_index).encode("ascii"))
             image, label = pickle.loads(byteflow)
 
             with io.BytesIO() as arr:
@@ -46,15 +85,11 @@ class LMDBClassIter:
             batch.append(image)
             labels.append(np.array(label))
             self.i += 1
-            if self.i == self.length:
-                raise StopIteration # TODO: Implement proper iterator behavior
-                if self.shuffle and self.shuffle_each_epoch:
-                    self.shuffle_indices = np.random.permutation(self.length)
-                self.i = 0
-                # TODO: Check how shuffling is handled in last partial batch and how partial batches are handled in NVIDIA DALI
-                if self.partial_batch:
-                    break
+
         return (batch, labels)
+
+    def __len__(self):
+        return self.length
 
 class RAPipeline(Pipeline):
 
@@ -74,15 +109,9 @@ class RAPipeline(Pipeline):
 
         self.get_iparam = get_iparam
 
-        self.rng = ops.random.CoinFlip()
-
-        self.uniform = ops.random.Uniform()
-
-        #self.shape = ops.Shapes(dtype=types.DALIDataType.INT32)
-
         def get_enhanced_fparam(probability):
-            signs = self.rng(probability=0.5) * 2 - 1
-            to_apply = self.rng(probability=probability)
+            signs = fn.random.coin_flip(probability=0.5) * 2 - 1
+            to_apply = fn.random.coin_flip(probability=probability)
             return (self.get_fparam(0.9) * signs + 1) * to_apply + 1.0 * (to_apply ^ True)# Lower bound maybe?
 
         self.get_enhanced_fparam = get_enhanced_fparam
@@ -98,51 +127,32 @@ class RAPipeline(Pipeline):
 
         self.mux = mux
 
-        # Rotation
-        self.rotate = ops.Rotate(device="gpu", keep_size=True)
-
-        # Saturation
-        self.saturation = ops.Hsv(device="gpu")
-
-        # Contrast
-        self.contrast = ops.Contrast(device="gpu")
-
-        # Brightness
-        self.brightness = ops.Brightness(device="gpu")
-
-        # Sharpness
-        self.sharpness = ops.GaussianBlur(device = "gpu", window_size=3)
-
         # ShearX
-        self.shearxp = ops.WarpAffine(device="gpu", matrix=(1, self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False)
-        self.shearxn = ops.WarpAffine(device="gpu", matrix=(1, -self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False)
+        self.shearxp = partial(fn.warp_affine, device="gpu", matrix=(1, self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False)
+        self.shearxn = partial(fn.warp_affine, device="gpu", matrix=(1, -self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False)
 
         # ShearY
-        self.shearyp = ops.WarpAffine(device="gpu", matrix=(1, 0, 0, self.get_fparam(0.3), 1, 0), inverse_map=False)
-        self.shearyn = ops.WarpAffine(device="gpu", matrix=(1, 0, 0, -self.get_fparam(0.3), 1, 0), inverse_map=False)
+        self.shearyp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, self.get_fparam(0.3), 1, 0), inverse_map=False)
+        self.shearyn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, -self.get_fparam(0.3), 1, 0), inverse_map=False)
 
         # TranslateX
-        self.trxp = ops.WarpAffine(device="gpu", matrix=(1, 0, self.get_iparam(10), 0, 1, 0), inverse_map=False)
-        self.trxn = ops.WarpAffine(device="gpu", matrix=(1, 0, -self.get_iparam(10), 0, 1, 0), inverse_map=False)
+        self.trxp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, self.get_iparam(10), 0, 1, 0), inverse_map=False)
+        self.trxn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, -self.get_iparam(10), 0, 1, 0), inverse_map=False)
 
         # TranslateY
-        self.tryp = ops.WarpAffine(device="gpu", matrix=(1, 0, 0, 0, 1, self.get_iparam(10)), inverse_map=False)
-        self.tryn = ops.WarpAffine(device="gpu", matrix=(1, 0, 0, 0, 1, -self.get_iparam(10)), inverse_map=False)
+        self.tryp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, 0, 1, self.get_iparam(10)), inverse_map=False)
+        self.tryn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, 0, 1, -self.get_iparam(10)), inverse_map=False)
 
         # RandomCrop
-        self.crop = ops.RandomResizedCrop(device="gpu", size=[32, 32], random_area=[float((7/8)**2), 1.0])
-
-        # Flip
-        self.hflip = ops.Flip(device="gpu")
+        self.crop = partial(fn.random_resized_crop, device="gpu", size=[32, 32], random_area=[float((7/8)**2), 1.0])
 
         # Thumbnail
-        self.thumbnail = ops.Resize(device="gpu", size=[8, 8])
-        self.paste = ops.Paste(device="gpu", ratio=4, fill_value=0)
+        self.thumbnail = partial(fn.resize, device="gpu", size=[8, 8])
 
         # UINT8->F32
-        self.to_float = ops.Cast(device="gpu", dtype=types.DALIDataType.FLOAT)
-        self.to_bchw = ops.Transpose(device="gpu", perm=[2, 0, 1]) # axes are already in "WH" format
-        self.normalize = ops.Normalize(device="gpu", axes=[0, 1], batch=True) #, mean=[0.4914, 0.4822, 0.4465], stddev=[0.2470, 0.2435, 0.2616])
+        self.to_float = partial(fn.cast, device="gpu", dtype=types.DALIDataType.FLOAT)
+        self.to_bchw = partial(fn.transpose, device="gpu", perm=[2, 0, 1]) # axes are already in "WH" format
+        self.normalize = partial(fn.normalize, device="gpu", axes=[0, 1], batch=True) #, mean=[0.4914, 0.4822, 0.4465], stddev=[0.2470, 0.2435, 0.2616])
 
 
         
@@ -156,60 +166,60 @@ class RAPipeline(Pipeline):
         labels = labels.gpu()
 
         # Rotation
-        angle = self.get_fparam(30.0) * self.rng(probability=0.1)
-        images_0 = self.rotate(images, angle=angle)
+        angle = self.get_fparam(30.0) * fn.random.coin_flip(probability=0.1)
+        images_0 = fn.rotate(images, angle=angle, device="gpu", keep_size=True)
 
         # Saturation
         sat = self.get_enhanced_fparam(0.1)
-        images_1 = self.saturation(images_0, saturation=sat)
+        images_1 = fn.hsv(images_0, saturation=sat, device="gpu")
 
         # Contrast
         cont = self.get_enhanced_fparam(0.1)
-        images_2 = self.contrast(images_1, contrast=cont)
+        images_2 = fn.contrast(images_1, contrast=cont, device="gpu")
 
         # Brightness
         brt = self.get_enhanced_fparam(0.1)
-        images_3 = self.brightness(images_2, brightness=brt)
+        images_3 = fn.brightness(images_2, brightness=brt, device="gpu")
 
         # Sharpness (Converted to Blur temporarily)
-        shp = self.get_fparam(-0.9) * self.rng(probability=0.1) + 1 #self.get_enhanced_fparam(1.0)
-        images_4 = self.blend(self.sharpness(images_3), images_3, shp)
+        shp = self.get_fparam(-0.9) * fn.random.coin_flip(probability=0.1) + 1 #self.get_enhanced_fparam(1.0)
+        images_4 = self.blend(fn.gaussian_blur(images_3, window_size=3, device="gpu"), images_3, shp)
 
         # ShearX
-        sx = self.rng(probability=0.1)
-        sxsign = self.rng(probability=0.5)
+        sx = fn.random.coin_flip(probability=0.1)
+        sxsign = fn.random.coin_flip(probability=0.5)
         img_sx = self.mux(sxsign, self.shearxp(images_4), self.shearxn(images_4))
         images_5 = self.mux(sx, img_sx, images_4)
 
         # ShearY
-        sy = self.rng(probability=0.1)
-        sysign = self.rng(probability=0.5)
+        sy = fn.random.coin_flip(probability=0.1)
+        sysign = fn.random.coin_flip(probability=0.5)
         img_sy = self.mux(sysign, self.shearyp(images_5), self.shearyn(images_5))
         images_6 = self.mux(sy, img_sy, images_5)
 
         # TranslateX
-        tx = self.rng(probability=0.1)
-        txsign = self.rng(probability=0.5)
+        tx = fn.random.coin_flip(probability=0.1)
+        txsign = fn.random.coin_flip(probability=0.5)
         img_tx = self.mux(txsign, self.trxp(images_6), self.trxn(images_6))
         images_7 = self.mux(tx, img_tx, images_6)
 
         # TranslateY
-        ty = self.rng(probability=0.1)
-        tysign = self.rng(probability=0.5)
+        ty = fn.random.coin_flip(probability=0.1)
+        tysign = fn.random.coin_flip(probability=0.5)
         img_ty = self.mux(tysign, self.tryp(images_7), self.tryn(images_7))
         images_8 = self.mux(ty, img_ty, images_7)
 
         # Random Crop
         images_9 = self.crop(images_8)
 
-        to_flip = self.rng(probability=0.5)
-        images_10 = self.hflip(images_9, horizontal=to_flip)
+        to_flip = fn.random.coin_flip(probability=0.5)
+        images_10 = fn.flip(images_9, horizontal=to_flip, device="gpu")
 
         images_thumb = self.thumbnail(images)
-        thumb_patches = self.paste(images_thumb, paste_x=self.uniform(range=[0.0, 0.75]), paste_y=self.uniform(range=[0.0, 0.75])) 
+        thumb_patches = fn.paste(images_thumb, paste_x=fn.random.uniform(range=[0.0, 0.75]), paste_y=fn.random.uniform(range=[0.0, 0.75]), ratio=4, fill_value=0, device="gpu") 
         thumb_mask = thumb_patches > 0
         thumb_blend = self.mux(thumb_mask, thumb_patches, images_10)
-        use_thumb = self.rng(probability=0.1)
+        use_thumb = fn.random.coin_flip(probability=0.1)
         images_11 = self.mux(use_thumb, thumb_blend, images_10)
 
         # Convert to typical PyTorch input
@@ -222,13 +232,12 @@ class RAPipeline(Pipeline):
 
 class LCRAPipeline(RAPipeline):
 
-    def __init__(self, path, batch_size, num_threads, device_id, num_gpus, magnitude, max_magnitude=30):
+    def __init__(self, path, batch_size, num_threads, device_id, num_gpus, magnitude, shuffle=True, last_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None, max_magnitude=30):
         super(LCRAPipeline, self).__init__(batch_size, num_threads, device_id, num_gpus, magnitude, max_magnitude)
 
-        self.iterator = LMDBClassIter(path, batch_size)
-        self.input = ops.ExternalSource(self.iterator, num_outputs=2, cycle="raise")
+        self.iterator = LMDBClassIter(path, batch_size, shuffle=shuffle, partial_batch_policy=last_batch_policy, last_batch_padded=last_batch_padded, sublist=sublist)
 
     def define_graph(self):
-        images, labels = self.input()
+        images, labels = fn.external_source(self.iterator, num_outputs=2, cycle="raise")
         images_out, labels_out = self.define_ra_graph(images, labels)
         return images_out, labels_out
