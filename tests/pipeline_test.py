@@ -38,15 +38,26 @@ def test_pipeline_output_image():
 
 def test_pipeline_iteration_config():
     config = get_global_config()
-    pipeline = LCRAPipeline(config.tests.lmdb_dataset_path, 3, 2, 0, 2, 25, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=False, sublist=list(range(100)), shuffle=False)
+    pipeline = LCRAPipeline(config.tests.lmdb_dataset_path, 3, 1, 0, 2, 25, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=False, sublist=list(range(10)), shuffle=False)
     pipeline.build()
     test_loader = DALIClassificationIterator(pipeline, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
+    pipeline.iterator.epoch = 0
     total_len = 0
     for i, elem in enumerate(test_loader):
         input = elem[0]["data"]
         target = elem[0]["label"]
         total_len += input.size()[0]
-        print("Batch {}, length: {}, targets: {}, total length: {}".format(i, input.size()[0], target.cpu(), total_len))
+        #print("Batch {}, length: {}, targets: {}, total length: {}".format(i, input.size()[0], target.cpu(), total_len))
+    pipeline = LCRAPipeline(config.tests.lmdb_dataset_path, 3, 1, 1, 2, 25, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=False, sublist=list(range(10)), shuffle=False)
+    pipeline.build()
+    test_loader = DALIClassificationIterator(pipeline, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
+    pipeline.iterator.epoch = 0
+    total_len = 0
+    for i, elem in enumerate(test_loader):
+        input = elem[0]["data"]
+        target = elem[0]["label"]
+        total_len += input.size()[0]
+        #print("Batch {}, length: {}, targets: {}, total length: {}".format(i, input.size()[0], target.cpu(), total_len))
 
 
 def _not_test_pipeline_output_speed():

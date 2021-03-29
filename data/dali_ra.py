@@ -13,28 +13,54 @@ from nvidia.dali.plugin.pytorch import LastBatchPolicy
 
 class LMDBClassIter:
 
-    def __init__(self, path, batch_size, shuffle=True, partial_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None):
+    def __init__(self, path, batch_size, device_id=0, num_gpus=1, shuffle=True, partial_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None, particles=None, weights=None, seed=None):
         self.path = os.path.expanduser(path)
         self.batch_size = batch_size
         self.env = lmdb.open(self.path, subdir=os.path.isdir(self.path), readonly=True, lock=False, readahead=False, meminit=False)
         with self.env.begin(write=False) as txn:
             self.length = pickle.loads(txn.get(b"__len__")) if sublist is None else len(sublist)
+        self.used_length = self.length
         self.shuffle = shuffle
         self.sublist = sublist
+        self.original_sublist = sublist
+        self.device_id = device_id
+        self.num_gpus = num_gpus
+        if num_gpus > 1:
+            if self.length % num_gpus != 0:
+                print("Warning: Dataset length not divisible by the number of GPUs, truncating...")
+                self.length = self.length - self.length % num_gpus
+                self.used_length = self.length
+                if self.original_sublist is not None:
+                    self.original_sublist = self.original_sublist[:self.length]
+            self.shard_size = self.length // self.num_gpus
         self.partial_batch_policy = partial_batch_policy
         self.last_batch_padded = last_batch_padded
         self.raise_stop_after = False
+        self.epoch = 0
+        self.particles = particles
+        self.weights = weights
+        self.ra_base = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        self.rng = np.random.default_rng(seed)
         
 
     def __iter__(self):
         # print("Called __iter__")
         self.i = 0
+        if self.num_gpus > 1:
+            start_index = ((self.device_id + self.epoch) % self.num_gpus) * self.used_length // self.num_gpus
+            end_index = ((self.device_id + self.epoch) % self.num_gpus + 1) * self.used_length // self.num_gpus
+            if self.original_sublist is not None:
+                self.sublist = self.original_sublist[start_index:end_index]
+            else:
+                self.sublist = np.arange(start_index, end_index, dtype=np.int32)
+            self.length = len(self.sublist)
+            #print("Sublist:{} {}-{}".format(self.sublist, start_index, end_index))
         self.raise_stop_after = False
         if self.shuffle:
             if self.sublist is not None:
-                self.shuffle_indices = np.random.permutation(self.sublist)
+                self.shuffle_indices = self.rng.permutation(self.sublist)
             else:
-                self.shuffle_indices = np.random.permutation(self.length)
+                self.shuffle_indices = self.rng.permutation(np.arange(self.length))
         return self
 
     def __next__(self):
@@ -51,6 +77,7 @@ class LMDBClassIter:
 
         batch = []
         labels = []
+        augmentations = []
 
         # print("Started iteration with start index: ", self.i)
 
@@ -69,7 +96,7 @@ class LMDBClassIter:
                 cur_index = self.i % self.length
 
             if self.shuffle:
-                    cur_index = self.shuffle_indices[cur_index]
+                cur_index = self.shuffle_indices[cur_index]
             elif self.sublist is not None:
                 cur_index = self.sublist[cur_index]
 
@@ -84,9 +111,18 @@ class LMDBClassIter:
                 image = np.load(arr, allow_pickle=True)
             batch.append(image)
             labels.append(np.array(label))
+
+            #print("Device {} index {}".format(self.device_id, cur_index))
+
+            if self.particles is not None:
+                index = self.rng.choice(len(self.weights), 1, p=self.weights)
+                augmentations.append(self.particles[index])
+            else:
+                augmentations.append(self.rng.permutation(self.ra_base))
+
             self.i += 1
 
-        return (batch, labels)
+        return (batch, labels, augmentations)
 
     def __len__(self):
         return self.length
@@ -160,51 +196,61 @@ class RAPipeline(Pipeline):
 
 
 
-    def define_ra_graph(self, input, labels):
+    def define_ra_graph(self, input, labels, augmentations):
 
         images = input.gpu()
         labels = labels.gpu()
+        augmentations_1 = fn.element_extract(augmentations, element_map=0)
+        augmentations_2 = fn.element_extract(augmentations, element_map=1)
+        augmentations_3 = fn.element_extract(augmentations, element_map=2)
+        augmentations_4 = fn.element_extract(augmentations, element_map=3)
+        augmentations_5 = fn.element_extract(augmentations, element_map=4)
+        augmentations_6 = fn.element_extract(augmentations, element_map=5)
+        augmentations_7 = fn.element_extract(augmentations, element_map=6)
+        augmentations_8 = fn.element_extract(augmentations, element_map=7)
+        augmentations_9 = fn.element_extract(augmentations, element_map=8)
+        augmentations_10 = fn.element_extract(augmentations, element_map=9)
 
         # Rotation
-        angle = self.get_fparam(30.0) * fn.random.coin_flip(probability=0.1)
+        angle = self.get_fparam(30.0) * fn.random.coin_flip(probability=augmentations_1)
         images_0 = fn.rotate(images, angle=angle, device="gpu", keep_size=True)
 
         # Saturation
-        sat = self.get_enhanced_fparam(0.1)
+        sat = self.get_enhanced_fparam(augmentations_2)
         images_1 = fn.hsv(images_0, saturation=sat, device="gpu")
 
         # Contrast
-        cont = self.get_enhanced_fparam(0.1)
+        cont = self.get_enhanced_fparam(augmentations_3)
         images_2 = fn.contrast(images_1, contrast=cont, device="gpu")
 
         # Brightness
-        brt = self.get_enhanced_fparam(0.1)
+        brt = self.get_enhanced_fparam(augmentations_4)
         images_3 = fn.brightness(images_2, brightness=brt, device="gpu")
 
         # Sharpness (Converted to Blur temporarily)
-        shp = self.get_fparam(-0.9) * fn.random.coin_flip(probability=0.1) + 1 #self.get_enhanced_fparam(1.0)
+        shp = self.get_fparam(-0.9) * fn.random.coin_flip(probability=augmentations_5) + 1 #self.get_enhanced_fparam(1.0)
         images_4 = self.blend(fn.gaussian_blur(images_3, window_size=3, device="gpu"), images_3, shp)
 
         # ShearX
-        sx = fn.random.coin_flip(probability=0.1)
+        sx = fn.random.coin_flip(probability=augmentations_6)
         sxsign = fn.random.coin_flip(probability=0.5)
         img_sx = self.mux(sxsign, self.shearxp(images_4), self.shearxn(images_4))
         images_5 = self.mux(sx, img_sx, images_4)
 
         # ShearY
-        sy = fn.random.coin_flip(probability=0.1)
+        sy = fn.random.coin_flip(probability=augmentations_7)
         sysign = fn.random.coin_flip(probability=0.5)
         img_sy = self.mux(sysign, self.shearyp(images_5), self.shearyn(images_5))
         images_6 = self.mux(sy, img_sy, images_5)
 
         # TranslateX
-        tx = fn.random.coin_flip(probability=0.1)
+        tx = fn.random.coin_flip(probability=augmentations_8)
         txsign = fn.random.coin_flip(probability=0.5)
         img_tx = self.mux(txsign, self.trxp(images_6), self.trxn(images_6))
         images_7 = self.mux(tx, img_tx, images_6)
 
         # TranslateY
-        ty = fn.random.coin_flip(probability=0.1)
+        ty = fn.random.coin_flip(probability=augmentations_9)
         tysign = fn.random.coin_flip(probability=0.5)
         img_ty = self.mux(tysign, self.tryp(images_7), self.tryn(images_7))
         images_8 = self.mux(ty, img_ty, images_7)
@@ -219,7 +265,7 @@ class RAPipeline(Pipeline):
         thumb_patches = fn.paste(images_thumb, paste_x=fn.random.uniform(range=[0.0, 0.75]), paste_y=fn.random.uniform(range=[0.0, 0.75]), ratio=4, fill_value=0, device="gpu") 
         thumb_mask = thumb_patches > 0
         thumb_blend = self.mux(thumb_mask, thumb_patches, images_10)
-        use_thumb = fn.random.coin_flip(probability=0.1)
+        use_thumb = fn.random.coin_flip(probability=augmentations_10)
         images_11 = self.mux(use_thumb, thumb_blend, images_10)
 
         # Convert to typical PyTorch input
@@ -235,9 +281,9 @@ class LCRAPipeline(RAPipeline):
     def __init__(self, path, batch_size, num_threads, device_id, num_gpus, magnitude, shuffle=True, last_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None, max_magnitude=30):
         super(LCRAPipeline, self).__init__(batch_size, num_threads, device_id, num_gpus, magnitude, max_magnitude)
 
-        self.iterator = LMDBClassIter(path, batch_size, shuffle=shuffle, partial_batch_policy=last_batch_policy, last_batch_padded=last_batch_padded, sublist=sublist)
+        self.iterator = LMDBClassIter(path, batch_size, device_id=device_id, num_gpus=num_gpus, shuffle=shuffle, partial_batch_policy=last_batch_policy, last_batch_padded=last_batch_padded, sublist=sublist)
 
     def define_graph(self):
-        images, labels = fn.external_source(self.iterator, num_outputs=2, cycle="raise")
-        images_out, labels_out = self.define_ra_graph(images, labels)
+        images, labels, augmentations = fn.external_source(self.iterator, num_outputs=3, cycle="raise")
+        images_out, labels_out = self.define_ra_graph(images, labels, augmentations)
         return images_out, labels_out
