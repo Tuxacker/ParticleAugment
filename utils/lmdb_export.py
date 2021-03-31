@@ -1,6 +1,10 @@
 
 import io
+import pathlib
 import pickle
+import sys
+    
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
 import lmdb
 import numpy as np
@@ -45,10 +49,6 @@ def export_classification_dataset(path, dataset, name="lmdb_dataset", write_freq
 
 if __name__ == "__main__":
 
-    import sys
-    
-    sys.path.append(get_parent_dir(__file__, go_back=1))
-
     config = get_global_config()
-    dataset = CIFAR10(config.lmdb_export.lmdb_dataset_dir, train=True)
-    export_classification_dataset(config.lmdb_export.lmdb_dataset_dir, dataset)
+    dataset = CIFAR10(config.lmdb_export.lmdb_dataset_dir, train=sys.argv[1] == "train")
+    export_classification_dataset(config.lmdb_export.lmdb_dataset_dir, dataset, name=sys.argv[2])

@@ -1,4 +1,34 @@
+deterministic: True
+batch_size: 128
+model: wide_resnet
+model_params:
+  depth: 28
+  width: 2
+  dropout_rate: 0.0
+dataset_params:
+  num_classes: 10
+optimizer_params:
+  momentum: 0.9
+  weight_decay: 0.0005
+  nesterov: True
+lrs_params:
+  warmup: False
+sync_bn: False
+lr: 0.1
+epochs: 200
+ra_m: 10
+resume: False
+evaluate: False
+test: False
+amp: True
+profile: -1
+debug_print_freq: 50
+validation_interval: 1
+train_dataset_path: "~/datasets/CIFAR/lmdb_dataset.lmdb"
+val_dataset_path: "~/datasets/CIFAR/cifar10-val.lmdb"
+
 tests:
   lmdb_dataset_path: "~/datasets/CIFAR/lmdb_dataset.lmdb"
+  lmdb_val_dataset_path: "~/datasets/CIFAR/cifar10-val.lmdb"
 lmdb_export:
   lmdb_dataset_dir: "~/datasets/CIFAR/"

@@ -6,18 +6,18 @@ from torch.cuda import ByteTensor, HalfTensor, FloatTensor
 
 from nvidia.dali.plugin.pytorch import DALIClassificationIterator, LastBatchPolicy
 
-from data.dali_ra import LCRAPipeline
+from data.dali_ra import get_lcra_with_iterator
 from utils.config_src import get_global_config
 
 def test_create_pipeline():
     config = get_global_config()
-    pipeline = LCRAPipeline(config.tests.lmdb_dataset_path, 512, 32, 0, 2, 5)
+    pipeline, _ = get_lcra_with_iterator(config.tests.lmdb_dataset_path, 512, 32, 0, 2, 5)
     pipeline.build()
     assert pipeline is not None
 
 def test_pipeline_output_image():
     config = get_global_config()
-    pipeline = LCRAPipeline(config.tests.lmdb_dataset_path, 4, 2, 0, 2, 25)
+    pipeline, _ = get_lcra_with_iterator(config.tests.lmdb_dataset_path, 4, 2, 0, 2, 25)
     pipeline.build()
     test_loader = DALIClassificationIterator(pipeline)
     for elem in test_loader:
@@ -36,22 +36,33 @@ def test_pipeline_output_image():
         break
     assert pipeline is not None
 
-def test_pipeline_iteration_config():
+def test_reset():
     config = get_global_config()
-    pipeline = LCRAPipeline(config.tests.lmdb_dataset_path, 3, 1, 0, 2, 25, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=False, sublist=list(range(10)), shuffle=False)
+    pipeline, iterator = get_lcra_with_iterator(config.tests.lmdb_dataset_path, 3, 1, 0, 1, 25, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True, sublist=list(range(10)))
     pipeline.build()
     test_loader = DALIClassificationIterator(pipeline, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
-    pipeline.iterator.epoch = 0
+    for _ in range(5):
+        for elem in test_loader:
+            input = elem[0]["data"]
+            target = elem[0]["label"]
+        test_loader.reset()
+
+def test_pipeline_iteration_config():
+    config = get_global_config()
+    pipeline, iterator = get_lcra_with_iterator(config.tests.lmdb_dataset_path, 3, 1, 0, 2, 25, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=False, sublist=list(range(10)), shuffle=False)
+    pipeline.build()
+    test_loader = DALIClassificationIterator(pipeline, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
+    iterator.epoch = 0
     total_len = 0
     for i, elem in enumerate(test_loader):
         input = elem[0]["data"]
         target = elem[0]["label"]
         total_len += input.size()[0]
         #print("Batch {}, length: {}, targets: {}, total length: {}".format(i, input.size()[0], target.cpu(), total_len))
-    pipeline = LCRAPipeline(config.tests.lmdb_dataset_path, 3, 1, 1, 2, 25, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=False, sublist=list(range(10)), shuffle=False)
+    pipeline, _ = get_lcra_with_iterator(config.tests.lmdb_dataset_path, 3, 1, 1, 2, 25, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=False, sublist=list(range(10)), shuffle=False)
     pipeline.build()
     test_loader = DALIClassificationIterator(pipeline, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
-    pipeline.iterator.epoch = 0
+    iterator.epoch = 0
     total_len = 0
     for i, elem in enumerate(test_loader):
         input = elem[0]["data"]
@@ -62,7 +73,7 @@ def test_pipeline_iteration_config():
 
 def _not_test_pipeline_output_speed():
     config = get_global_config()
-    pipeline = LCRAPipeline(config.tests.lmdb_dataset_path, 512, 16, 0, 2, 25)
+    pipeline, _ = get_lcra_with_iterator(config.tests.lmdb_dataset_path, 512, 16, 0, 2, 25)
     pipeline.build()
     test_loader = DALIClassificationIterator(pipeline)
     loaded_samples = 0
