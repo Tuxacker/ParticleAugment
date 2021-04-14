@@ -1,8 +1,12 @@
 import argparse
+#from contextlib import ContextDecorator
 import os
 import shutil
 import sys
 import time
+import logging
+import datetime
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -19,9 +23,10 @@ import torch.cuda.amp as amp
 #import torchvision.models as models
 
 import numpy as np
+import json
 
 try:
-    from nvidia.dali.plugin.pytorch import DALIClassificationIterator, LastBatchPolicy
+    from nvidia.dali.plugin.pytorch import DALIClassificationIterator, DALIGenericIterator, LastBatchPolicy
 except ImportError:
     raise ImportError("Please install all requirements, NVIDIA DALI seems to be missing!")
 
@@ -30,77 +35,35 @@ from components.loss_factory import loss_from_config
 from components.optimizer_factory import optimizer_from_config
 from components.lrs_factory import lrs_from_config
 from data.dali_ra import get_lcra_train_iterator, get_lcra_val_iterator
+from data.pim_loader import get_cifar_10_train_loader, get_cifar_10_val_loader
 from utils.config_src import get_global_config
 
-def parse():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("config")
-    parser.add_argument("--local_rank", nargs='?', const=-1, default=-1, type=int)
-    parser.add_argument("--resume", nargs='?', default="")
-    args = parser.parse_args()
-    return args
 
-# def parse():
-#     model_names = sorted(name for name in models.__dict__
-#                      if name.islower() and not name.startswith("__")
-#                      and callable(models.__dict__[name]))
+def main(local_rank=-1, world_size=1, overrides=None):
 
-#     parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-#     parser.add_argument('data', metavar='DIR', nargs='*',
-#                         help='path(s) to dataset (if one path is provided, it is assumed\n' +
-#                        'to have subdirectories named "train" and "val"; alternatively,\n' +
-#                        'train and val paths can be specified directly by providing both paths as arguments)')
-#     parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
-#                         choices=model_names,
-#                         help='model architecture: ' +
-#                         ' | '.join(model_names) +
-#                         ' (default: resnet18)')
-#     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
-#                         help='number of data loading workers (default: 4)')
-#     parser.add_argument('--epochs', default=90, type=int, metavar='N',
-#                         help='number of total epochs to run')
-#     parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
-#                         help='manual epoch number (useful on restarts)')
-#     parser.add_argument('-b', '--batch-size', default=256, type=int,
-#                         metavar='N', help='mini-batch size per process (default: 256)')
-#     parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
-#                         metavar='LR', help='Initial learning rate.  Will be scaled by <global batch size>/256: args.lr = args.lr*float(args.batch_size*args.world_size)/256.  A warmup schedule will also be applied over the first 5 epochs.')
-#     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-#                         help='momentum')
-#     parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
-#                         metavar='W', help='weight decay (default: 1e-4)')
-#     parser.add_argument('--print-freq', '-p', default=10, type=int,
-#                         metavar='N', help='print frequency (default: 10)')
-#     parser.add_argument('--resume', default='', type=str, metavar='PATH',
-#                         help='path to latest checkpoint (default: none)')
-#     parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
-#                         help='evaluate model on validation set')
-#     parser.add_argument('--pretrained', dest='pretrained', action='store_true',
-#                         help='use pre-trained model')
+    global best_prec1, _args, config, logger
 
-#     parser.add_argument('--dali_cpu', action='store_true',
-#                         help='Runs CPU based version of DALI pipeline.')
-#     parser.add_argument('--prof', default=-1, type=int,
-#                         help='Only run 10 iterations for profiling.')
-#     parser.add_argument('--deterministic', action='store_true')
+    logFormatter = logging.Formatter("%(asctime)s %(message)s")
+    logger = logging.getLogger(str(local_rank))
+    logger.setLevel(logging.INFO)
+    # Fix for dumb duplication bug
+    logger.propagate = False
 
-#     parser.add_argument("--local_rank", default=0, type=int)
-#     parser.add_argument('--sync_bn', action='store_true',
-#                         help='enabling apex sync BN.')
+    suffix = "" if local_rank == -1 else "_r" + str(local_rank)
 
-#     parser.add_argument('--opt-level', type=str, default=None)
-#     parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
-#     parser.add_argument('--loss-scale', type=str, default=None)
-#     parser.add_argument('--channels-last', type=bool, default=False)
-#     parser.add_argument('-t', '--test', action='store_true',
-#                         help='Launch test mode with preset arguments')
-#     args = parser.parse_args()
-#     return args
+    file_name = datetime.datetime.now().strftime("%y%m%d%H%M%S") + suffix + ".log"
+    work_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work_dir")
+    Path(work_dir).mkdir(parents=True, exist_ok=True)
+    log_path = os.path.join(work_dir, file_name) 
 
+    fileHandler = logging.FileHandler(log_path)
+    fileHandler.setFormatter(logFormatter)
+    logger.addHandler(fileHandler)
 
-def main(local_rank=-1, world_size=1):
-
-    global best_prec1, _args, config
+    if local_rank < 1:
+        consoleHandler = logging.StreamHandler(sys.stdout)
+        consoleHandler.setFormatter(logFormatter)
+        logger.addHandler(consoleHandler)
 
     best_prec1 = 0.0
 
@@ -108,12 +71,16 @@ def main(local_rank=-1, world_size=1):
 
     config = get_global_config()
 
+    if type(overrides) is dict:
+        config = merge_dict(config, overrides)
+
     if local_rank > -1:
         config.distributed = True
         config.local_rank = local_rank
         if local_rank > 0:
-            f = open("/dev/null", "w")
-            sys.stdout = f
+            #f = open("/dev/null", "w")
+            #sys.stdout = f
+            pass
     else:
         config.local_rank = 0
 
@@ -131,7 +98,7 @@ def main(local_rank=-1, world_size=1):
     if 'MASTER_PORT' not in os.environ:
         os.environ['MASTER_PORT'] = "2222"
 
-    print("CUDNN VERSION: {}".format(cudnn.version()))
+    logger.info("CUDNN VERSION: {}".format(cudnn.version()))
 
     cudnn.benchmark = True
     cudnn.deterministic = False
@@ -157,23 +124,28 @@ def main(local_rank=-1, world_size=1):
     config.total_batch_size = config.world_size * config.batch_size
     assert cudnn.enabled, "CUDNN backend needs to be enabled."
 
+    logger.info("Using config:")
+    logger.info(json.dumps(config, indent=4))
+
     model = model_from_config(config)
 
     if config.sync_bn:
-        print("Converted model BN to SyncBatchNorm")
+        logger.info("Converted model BN to SyncBatchNorm")
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
     model = model.to(config.device_id)
 
     # Scale learning rate based on global batch size
-    config.lr = config.lr * float(config.batch_size * config.world_size) / 256.0
+    #config.lr = config.lr * float(config.batch_size * config.world_size) / 256.0
+    config.lr *= config.world_size
 
     config.start_epoch = 0
 
     if config.distributed:
+        logger.info("Using DDP")
         model = DDP(model, device_ids=[config.device_id], output_device=config.device_id)
 
-    criterion = loss_from_config(config)
+    criterion = loss_from_config(config).to(config.device_id)
 
     optimizer = optimizer_from_config(config, model)
 
@@ -186,7 +158,7 @@ def main(local_rank=-1, world_size=1):
         # Use a local scope to avoid dangling references
         def resume():
             if os.path.isfile(config.resume):
-                print("=> loading checkpoint '{}'".format(config.resume))
+                logger.info("=> loading checkpoint '{}'".format(config.resume))
                 checkpoint = torch.load(config.resume, map_location = lambda storage, loc: storage.cuda(config.device_id))
                 config.start_epoch = checkpoint['epoch']
                 global best_prec1
@@ -196,38 +168,72 @@ def main(local_rank=-1, world_size=1):
                 lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
                 if checkpoint['scaler'] is not None:
                     scaler.load_state_dict(checkpoint['scaler'])
-                print("=> loaded checkpoint '{}' (epoch {})"
+                logger.info("=> loaded checkpoint '{}' (epoch {})"
                       .format(config.resume, checkpoint['epoch']))
             else:
-                print("=> no checkpoint found at '{}'".format(config.resume))
+                logger.info("=> no checkpoint found at '{}'".format(config.resume))
         if config.distributed:
             dist.barrier()
         resume()
 
-    trainp, train_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True)
-    trainp.build()
-    train_loader = DALIClassificationIterator(trainp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
+    # TODO: Mayber change DALI iterator reset trigger to config setting
+    if config.dataloader == "dali":
+        trainp, train_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True)
+        trainp.build()
+        train_loader = DALIClassificationIterator(trainp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
 
-    valp, val_iterator = get_lcra_val_iterator(config.val_dataset_path, config.batch_size, 16, config.device_id, config.world_size)
-    valp.build()
-    val_loader = DALIClassificationIterator(valp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
+        valp, val_iterator = get_lcra_val_iterator(config.val_dataset_path, config.batch_size, 16, config.device_id, config.world_size)
+        valp.build()
+        val_loader = DALIClassificationIterator(valp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
+
+        filp, fil_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True, shuffle=False, sublist=list(range(config.batch_size*4)))
+        filp.build()
+        fil_loader = DALIClassificationIterator(filp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True, prepare_first_batch=False)
+        #fil_iterator.name = "fil_iterator
+    elif config.dataloader == "pim":
+        train_loader, train_iterator = get_cifar_10_train_loader(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m)
+        val_loader = get_cifar_10_val_loader(config.val_dataset_path, config.batch_size, 16, config.device_id, config.world_size)
+        val_iterator = None
+        indices = train_loader.dataset.get_balanced_subset(config.batch_size*4)
+        fil_loader, fil_iterator = get_cifar_10_train_loader(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m, subset=indices)
+
 
     if config.evaluate:
-        validate(val_loader, val_loader, model, criterion)
+        validate(val_loader, val_iterator, model, criterion)
         return
 
+    p_filter = ParticleFilter(model, train_iterator, fil_loader, fil_iterator, criterion)
+
     total_time = AverageMeter()
+
+    logger.info("Initial LR: {}".format(optimizer.param_groups[0]["lr"]))
+
     for epoch in range(config.start_epoch, config.epochs):
         # train for one epoch
+        if config.dataloader == "dali":
+            train_iterator.set_epoch(epoch)
+        p_filter.epoch = epoch
+        p_filter.p_enter(epoch, config.filter.enabled)
+
+        if config.distributed:
+            dist.barrier()
+
         avg_train_time = train(train_loader, train_iterator, model, criterion, optimizer, lr_scheduler, epoch, scaler)
+
+        if config.distributed:
+            dist.barrier()
+
+        p_filter.p_exit(epoch, config.filter.enabled)
         total_time.update(avg_train_time)
         if config.test:
             break
 
-        if epoch % config.validation_interval == 0:
-            # evaluate on validation set
-            [prec1, prec5] = validate(val_loader, val_iterator, model, criterion)
+        if config.distributed:
+            dist.barrier()
 
+        if epoch % config.validation_interval == 0 or epoch == config.epochs - 1:
+            # evaluate on validation set
+            [prec1, prec5, _] = validate(val_loader, val_iterator, model, criterion)
             # remember best prec@1 and save checkpoint
             if config.local_rank == 0:
                 is_best = prec1 > best_prec1
@@ -241,14 +247,19 @@ def main(local_rank=-1, world_size=1):
                     'scaler': scaler.state_dict()
                 }, is_best)
                 if epoch == config.epochs - 1:
-                    print('##Top-1 {0}\n'
+                    logger.info('##Top-1 {0}\n'
                         '##Top-5 {1}\n'
                         '##Perf  {2}'.format(
                         prec1,
                         prec5,
                         config.total_batch_size / total_time.avg))
-            val_loader.reset()
-        train_loader.reset()
+            if type(val_loader) == DALIClassificationIterator or type(val_loader) == DALIGenericIterator:
+                val_loader.reset()
+        if type(train_loader) == DALIClassificationIterator or type(train_loader) == DALIGenericIterator:
+            train_loader.reset()
+        
+        if config.distributed:
+            dist.barrier()
 
 def train(train_loader, train_iterator, model, criterion, optimizer, lr_scheduler, epoch, scaler=None):
     batch_time = AverageMeter()
@@ -262,12 +273,18 @@ def train(train_loader, train_iterator, model, criterion, optimizer, lr_schedule
     epoch_start_time = time.time()
 
     for i, data in enumerate(train_loader):
-        input = data[0]["data"]
-        target = data[0]["label"].squeeze(-1).long()
-        train_loader_len = int(np.ceil(len(train_iterator) / config.batch_size))
+        if config.dataloader == "dali":
+            input = data[0]["data"]
+            target = data[0]["label"].squeeze(-1).long()
+            train_loader_len = int(np.ceil(len(train_iterator) / config.batch_size)) 
+        else:
+            input = data[0].to(config.device_id)
+            target = data[1].to(config.device_id)
+            train_loader_len = len(train_loader)
+
 
         if config.profile >= 0 and i == config.profile:
-            print("Profiling begun at iteration {}".format(i))
+            logger.info("Profiling begun at iteration {}".format(i))
             torch.cuda.cudart().cudaProfilerStart()
 
         if config.profile >= 0: torch.cuda.nvtx.range_push("Body of iteration {}".format(i))
@@ -277,6 +294,8 @@ def train(train_loader, train_iterator, model, criterion, optimizer, lr_schedule
             if i > 10:
                 break
 
+        optimizer.zero_grad()
+
         with amp.autocast(enabled=config.amp):
             # compute output
             if config.profile >= 0: torch.cuda.nvtx.range_push("forward")
@@ -284,22 +303,15 @@ def train(train_loader, train_iterator, model, criterion, optimizer, lr_schedule
             if config.profile >= 0: torch.cuda.nvtx.range_pop()
             loss = criterion(output, target)
 
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-
-        if config.profile >= 0: torch.cuda.nvtx.range_push("backward")
-        if config.amp:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-             loss.backward()
-        if config.profile >= 0: torch.cuda.nvtx.range_pop()
-
-        if config.profile >= 0: torch.cuda.nvtx.range_push("optimizer.step() and lr_scheduler.step()")
-        optimizer.step()
-        lr_scheduler.step()
-        if config.profile >= 0: torch.cuda.nvtx.range_pop()
+            if config.profile >= 0: torch.cuda.nvtx.range_push("backward and optimizer")
+            if config.amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+            if config.profile >= 0: torch.cuda.nvtx.range_pop()
 
         if i % config.debug_print_freq == 0 and i > 0:
             # Every print_freq iterations, check the loss, accuracy, and speed.
@@ -328,31 +340,37 @@ def train(train_loader, train_iterator, model, criterion, optimizer, lr_schedule
             end = time.time()
 
             if config.local_rank == 0:
-                print('Epoch: [{0}][{1}/{2}]\t'
-                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                      'Speed {3:.3f} ({4:.3f})\t'
-                      'Loss {loss.val:.10f} ({loss.avg:.4f})\t'
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                       epoch, i, train_loader_len,
+                logger.info('Train: E[{0:03d}/{me:03d}] B[{1:04d}/{2:04d}]'
+                      ' Time:{batch_time.val:.3f} ({batch_time.avg:.3f})'
+                      ' Speed:{3:.3f} ({4:.3f})'
+                      ' Loss:{loss.val:6.4f} ({loss.avg:6.4f})'
+                      ' Acc@1:{top1.val:6.3f} ({top1.avg:6.3f})'
+                      ' Acc@5:{top5.val:6.3f} ({top5.avg:6.3f})'.format(
+                       epoch + 1, i, train_loader_len,
                        config.world_size*config.batch_size/batch_time.val,
                        config.world_size*config.batch_size/batch_time.avg,
                        batch_time=batch_time,
-                       loss=losses, top1=top1, top5=top5))
+                       loss=losses, top1=top1, top5=top5, me=config.epochs))
 
         # Pop range "Body of iteration {}".format(i)
         if config.profile >= 0: torch.cuda.nvtx.range_pop()
 
         if config.profile >= 0 and i == config.profile + 10:
-            print("Profiling ended at iteration {}".format(i))
+            logger.info("Profiling ended at iteration {}".format(i))
             torch.cuda.cudart().cudaProfilerStop()
             quit()
 
-    print('Epoch: [{}]\t\tElapsed {:.3f}'.format(epoch, time.time() - epoch_start_time))
+    logger.info('Epoch: [{}]\t\tElapsed {:.3f}, LR:{}'.format(epoch + 1, time.time() - epoch_start_time, optimizer.param_groups[0]["lr"]))
+
+    #if config.dataloader == "pim":
+    #    logger.info("RA apply stats: {}".format(train_iterator.get_op_statistics()))
+    #    logger.info("RA count stats: {}".format(train_iterator.get_op_statistics(called=True)))
+
+    lr_scheduler.step()
 
     return batch_time.avg
 
-def validate(val_loader, val_iterator, model, criterion):
+def validate(val_loader, val_iterator, model, criterion, suppress_output=False, calc_acc=True):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -364,29 +382,37 @@ def validate(val_loader, val_iterator, model, criterion):
     end = time.time()
 
     for i, data in enumerate(val_loader):
-        input = data[0]["data"]
-        target = data[0]["label"].squeeze(-1).long()
-        val_loader_len = int(np.ceil(len(val_iterator) / config.batch_size))
+        if config.dataloader == "dali":
+            input = data[0]["data"]
+            target = data[0]["label"].squeeze(-1).long()
+            val_loader_len = int(np.ceil(len(val_iterator) / config.batch_size)) 
+        else:
+            input = data[0].to(config.device_id)
+            target = data[1].to(config.device_id)
+            val_loader_len = len(val_loader)
 
         # compute output
         with torch.no_grad(), amp.autocast(enabled=config.amp):
             output = model(input)
             loss = criterion(output, target)
 
-        # measure accuracy and record loss
-        #pylint: disable=unbalanced-tuple-unpacking
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+            # measure accuracy and record loss
+            #pylint: disable=unbalanced-tuple-unpacking
+            if calc_acc:
+                prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
 
-        if config.distributed:
-            reduced_loss = reduce_tensor(loss.data)
-            prec1 = reduce_tensor(prec1)
-            prec5 = reduce_tensor(prec5)
-        else:
-            reduced_loss = loss.data
+            if config.distributed:
+                reduced_loss = reduce_tensor(loss.data)
+                if calc_acc:
+                    prec1 = reduce_tensor(prec1)
+                    prec5 = reduce_tensor(prec5)
+            else:
+                reduced_loss = loss.data
 
-        losses.update(reduced_loss.item(), input.size(0))
-        top1.update(prec1.item(), input.size(0))
-        top5.update(prec5.item(), input.size(0))
+            losses.update(reduced_loss.item(), input.size(0))
+            if calc_acc:
+                top1.update(prec1.item(), input.size(0))
+                top5.update(prec5.item(), input.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -394,22 +420,23 @@ def validate(val_loader, val_iterator, model, criterion):
 
         # TODO:  Change timings to mirror train().
         if config.local_rank == 0 and i % config.debug_print_freq == 0 and i > 0:
-            print('Test: [{0}/{1}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Speed {2:.3f} ({3:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                  'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+            logger.info('  Val: B[{0:04d}/{1:04d}]'
+                  ' Time:{batch_time.val:.3f} ({batch_time.avg:.3f})'
+                  ' Speed:{2:.3f} ({3:.3f})'
+                  ' Loss:{loss.val:6.4f} ({loss.avg:6.4f})'
+                  ' Acc@1:{top1.val:6.3f} ({top1.avg:6.3f})'
+                  ' Acc@5:{top5.val:6.3f} ({top5.avg:6.3f})'.format(
                    i, val_loader_len,
                    config.world_size * config.batch_size / batch_time.val,
                    config.world_size * config.batch_size / batch_time.avg,
                    batch_time=batch_time, loss=losses,
                    top1=top1, top5=top5))
 
-    print('Validation:\t\tPrec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
-        .format(top1=top1, top5=top5))
+    if not suppress_output:
+        logger.info("  Val: Loss:{loss.avg:6.4f} Acc@1: {top1.avg:5.3f}, Acc@5: {top5.avg:5.3f}"
+            .format(loss=losses, top1=top1, top5=top5))
 
-    return [top1.avg, top5.avg]
+    return [top1.avg, top5.avg, losses.val]
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
@@ -434,6 +461,111 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+
+class ParticleFilter: #(ContextDecorator):
+
+    def __init__(self, model, train_iter, test_loader, test_iter, loss, seed=None):
+        self.model = model
+        self.train_iter = train_iter
+        self.test_loader = test_loader
+        self.test_iter = test_iter
+        self.loss = loss
+        self.n_states = 10 if config.dataloader == "dali" else 15
+        self.particles = np.zeros((config.filter.n_particles, self.n_states), dtype=np.float32)
+        self.weights = np.ones(config.filter.n_particles, dtype=np.float32) / config.filter.n_particles
+        self.rng = np.random.default_rng(seed)
+        self.init_particles()
+        self.old_losses = np.zeros((config.filter.n_particles + 1), dtype=np.float32)
+        self.new_losses = np.zeros((config.filter.n_particles + 1), dtype=np.float32)
+        self.epoch = 0
+
+    def init_particles(self):
+        for i in range(config.filter.n_particles):
+            indices = self.rng.choice(self.n_states, 2, replace=False)
+            for index in indices:
+                self.particles[i, index] = 1.0
+
+    def add_noise(self):
+         self.particles += self.rng.normal(0.0, config.filter.std, self.particles.shape)
+         self.particles = np.clip(self.particles, 0.0, 1.0)
+
+    def nomalize_weights(self):
+        self.weights = self.weights / np.sum(self.weights)
+        self.weights[-1] = 1 - np.sum(self.weights[:-1])
+        self.weights = np.clip(self.weights, 0.0, 1.0)
+
+    def resample(self):
+        p_copy = np.zeros_like(self.particles)
+        if config.filter.only_good:
+            good_policy_ids = self.weights * self.weights.shape[0] > config.filter.good_threshold
+            particles = np.array([p for i, p in enumerate(self.particles) if good_policy_ids[i]])
+            weights = self.weights[good_policy_ids]
+            weights = weights / np.sum(weights)
+            weights[-1] = 1 - np.sum(weights[:-1])
+            weights = np.clip(weights, 0.0, 1.0)
+        else:
+            particles = self.particles
+            weights = self.weights
+        for i in range(config.filter.n_particles):
+            index = self.rng.choice(len(weights), 1, p=weights)
+            p_copy[i] = particles[index]
+        self.particles = p_copy
+        self.weights = np.ones(config.filter.n_particles, dtype=np.float32) / config.filter.n_particles
+
+    def get_degeneration_index(self):
+        return 1 / np.sum(self.weights ** 2)
+
+    def eval_policy(self, index):
+        policy = self.particles[index] if index >= 0 else None
+        self.test_iter.particles = policy
+        #print("policy:", policy)
+        [_, _, total_loss] = validate(self.test_loader, self.test_iter, self.model, self.loss, suppress_output=True, calc_acc=False)
+        if type(self.test_loader) == DALIClassificationIterator or type(self.test_loader) == DALIGenericIterator:
+            self.test_loader.reset()
+        return total_loss
+
+    def p_enter(self, epoch=0, enabled=True):
+        self.epoch = epoch
+        if not enabled or self.epoch % config.filter.interval != 0:
+            return
+        logger.info("Epoch: [{}/{}] Filter step part 1/2".format(self.epoch + 1, config.epochs))
+        self.add_noise()
+        if config.distributed:
+            broadcast_numpy_tensor(self.particles)
+        for i in range(-1, config.filter.n_particles):
+            self.old_losses[i] = self.eval_policy(i)
+        self.train_iter.particles = self.particles
+        self.train_iter.weights = self.weights
+        
+    def p_exit(self, epoch=0, enabled=True):
+        self.epoch = epoch
+        if not enabled or self.epoch % config.filter.interval != 0:
+            return
+        logger.info("Epoch: [{}/{}] Filter step part 2/2".format(self.epoch + 1, config.epochs))
+        for i in range(-1, config.filter.n_particles):
+            self.new_losses[i] = self.eval_policy(i)
+        diff = (self.old_losses - self.new_losses) / config.batch_size
+        diff = diff[:-1] / diff[-1]
+        diff = np.tanh(diff - 1) + 1
+        self.weights *= np.power(diff, config.filter.lr)
+        self.nomalize_weights()
+        if self.get_degeneration_index() < config.filter.n_particles * config.filter.resample_threshold:
+            self.resample()
+        if config.filter.only_good:
+            good_policy_ids = self.weights * self.weights.shape[0] > config.filter.good_threshold
+            particles = np.array([p for i, p in enumerate(self.particles) if good_policy_ids[i]])
+            weights = self.weights[good_policy_ids]
+            weights = weights / np.sum(weights)
+            weights[-1] = 1 - np.sum(weights[:-1])
+            weights = np.clip(weights, 0.0, 1.0)
+            self.train_iter.particles = particles
+            self.train_iter.weights = weights
+        else:
+            self.train_iter.particles = self.particles
+            self.train_iter.weights = self.weights
+        if self.epoch % config.filter.print_policies_every == 0:
+            print_current_policies(self.particles, self.weights)
 
 
 def adjust_learning_rate(optimizer, epoch, step, len_epoch):
@@ -467,16 +599,83 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
-
 def reduce_tensor(tensor):
     rt = tensor.clone()
     dist.all_reduce(rt, op=dist.ReduceOp.SUM)
     rt /= config.world_size
     return rt
 
-if __name__ == '__main__':
+def broadcast_numpy_tensor(np_tensor):
+    torch_tensor = torch.from_numpy(np_tensor).to(config.local_rank)
+    dist.broadcast(torch_tensor, 0)
+    if config.local_rank > 0:
+        np_tensor = torch_tensor.cpu().numpy()
+    return np_tensor
 
-    if len(sys.argv) > 1:
-        torchmp.start_processes(main, nprocs=int(sys.argv[1]), args=(2,), start_method="forkserver")
+def print_current_policies(particles, weights, threshold=0.2):
+    i_max = np.argmax(weights)
+    best_policy = particles[i_max]
+    logger.info("Best policy: [" + ", ".join(["{:.2f}".format(p) for p in best_policy]) + "] ({})".format(i_max + 1))
+    logger.info("Weight degeneracy index: {:.2f}".format(1 / np.sum(weights ** 2) / weights.shape[0]))
+    for i in range(weights.shape[0]):
+        logger.info("Policy {} (p/pavg={:.2f}): [".format(i + 1, weights[i] * weights.shape[0]) + ", ".join(["{:.2f}".format(p) for p in particles[i]]) + "]")
+
+def merge_dict_entry(dst, patch):
+    for key in patch.keys():
+        if key not in dst.keys():
+            dst[key] = patch[key]
+        else:
+            if type(patch[key]) == dict:
+                merge_dict_entry(dst[key], patch[key])
+            else:
+                if patch[key] == "None":
+                    patch[key] = None
+                dst[key] = patch[key]
+
+# From https://stackoverflow.com/questions/7204805/how-to-merge-dictionaries-of-dictionaries
+def merge_dict(a, b, path=None):
+    if path is None: path = []
+    for key in b:
+        if key in a:
+            if isinstance(a[key], dict) and isinstance(b[key], dict):
+                merge_dict(a[key], b[key], path + [str(key)])
+            elif a[key] == b[key]:
+                pass # same leaf value
+            else:
+                 a[key] = b[key]
+        else:
+            a[key] = b[key]
+    return a
+
+if __name__ == '__main__':
+    if len(sys.argv) > 2:
+        overrides = dict()
+        for kv in sys.argv[2:]:
+            temp_dict = dict()
+            k, v = kv.split("=")
+            k = k.split(".")
+            try:
+                v = float(v)
+            except ValueError:
+                pass
+            if type(v) == float and v.is_integer():
+                v = int(v)
+            if v == "True":
+                v = True
+            if v == "False":
+                v = False
+            if len(k) == 1:
+                temp_dict[k[0]] = v
+            else:
+                cur_dict = {k[-1]: v}
+                for i in range(len(k) - 2, 0, -1):
+                    cur_dict = {k[i]: cur_dict}
+                temp_dict[k[0]] = cur_dict
+            merge_dict_entry(overrides, temp_dict)
     else:
-        main()
+        overrides = None
+
+    if len(sys.argv) > 1 and int(sys.argv[1]) > 1:
+        torchmp.start_processes(main, nprocs=int(sys.argv[1]), args=(int(sys.argv[1]), overrides), start_method="forkserver")
+    else:
+        main(overrides=overrides)

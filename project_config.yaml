@@ -13,17 +13,29 @@ optimizer_params:
   nesterov: True
 lrs_params:
   warmup: False
+  warmup_epochs: 5
+filter:
+  n_particles: 32
+  std: 0.025
+  lr: 0.1
+  resample_threshold: 0.8
+  interval: 2
+  enabled: False
+  print_policies_every: 5
+  only_good: True
+  good_threshold: 0.98
 sync_bn: False
 lr: 0.1
 epochs: 200
-ra_m: 10
+ra_m: 15
 resume: False
 evaluate: False
 test: False
 amp: True
 profile: -1
-debug_print_freq: 50
-validation_interval: 1
+debug_print_freq: 100
+validation_interval: 2
+dataloader: "dali"
 train_dataset_path: "~/datasets/CIFAR/lmdb_dataset.lmdb"
 val_dataset_path: "~/datasets/CIFAR/cifar10-val.lmdb"
 

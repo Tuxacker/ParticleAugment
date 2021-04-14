@@ -5,15 +5,18 @@ import pickle
 
 import lmdb
 import numpy as np
+import cupy
+from cupyx.scipy.signal import convolve2d
 
 from nvidia.dali.pipeline import Pipeline
 import nvidia.dali.types as types
 import nvidia.dali.fn as fn
 from nvidia.dali.plugin.pytorch import LastBatchPolicy
 
+
 class LMDBClassIter:
 
-    def __init__(self, path, batch_size, device_id=0, num_gpus=1, shuffle=True, last_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None, particles=None, weights=None, output_augmentations=True, seed=None):
+    def __init__(self, path, batch_size, device_id=0, num_gpus=1, shuffle=True, last_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None, particles=None, weights=None, output_augmentations=True, seed=0):
         self.path = os.path.expanduser(path)
         self.batch_size = batch_size
         self.env = lmdb.open(self.path, subdir=os.path.isdir(self.path), readonly=True, lock=False, readahead=False, meminit=False)
@@ -42,31 +45,51 @@ class LMDBClassIter:
         self.ra_base = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
         self.output_augmentations = output_augmentations
         self.rng = np.random.default_rng(seed)
+        self.seed = seed
+        #self.name = "default"
         
 
     def __iter__(self):
         # print("Called __iter__")
         self.i = 0
         if self.num_gpus > 1:
-            start_index = ((self.device_id + self.epoch) % self.num_gpus) * self.original_length // self.num_gpus
-            end_index = ((self.device_id + self.epoch) % self.num_gpus + 1) * self.original_length // self.num_gpus
-            if self.original_sublist is not None:
-                self.sublist = self.original_sublist[start_index:end_index]
+            if self.shuffle:
+                self.rng = np.random.default_rng(self.seed + self.epoch)
+                #start_index = ((self.device_id + self.epoch) % self.num_gpus) * self.original_length // self.num_gpus
+                #end_index = ((self.device_id + self.epoch) % self.num_gpus + 1) * self.original_length // self.num_gpus
+                if self.original_sublist is not None:
+                    self.sublist = self.rng.permutation(self.original_sublist)[self.device_id:self.original_length:self.num_gpus]
+                    #self.sublist = self.original_sublist[start_index:end_index]
+                    #print("case 1:", start_index, ":", end_index, "@", self.epoch, ",", self.device_id)
+                else:
+                    self.sublist = self.rng.permutation(self.original_length)[self.device_id:self.original_length:self.num_gpus]
+                    #self.sublist = np.arange(start_index, end_index, dtype=np.int32)
+                    #print("case 2:", start_index, ":", end_index, "@", self.epoch, ",", self.device_id)
+                self.length = len(self.sublist)
             else:
-                self.sublist = np.arange(start_index, end_index, dtype=np.int32)
-            self.length = len(self.sublist)
+                if self.original_sublist is not None:
+                    self.sublist = self.original_sublist[self.device_id:self.original_length:self.num_gpus]
+                    #self.sublist = self.original_sublist[start_index:end_index]
+                    #print("case 1:", start_index, ":", end_index, "@", self.epoch, ",", self.device_id)
+                else:
+                    self.sublist = np.arange(self.device_id, self.original_length, self.num_gpus)
+                    #self.sublist = np.arange(start_index, end_index, dtype=np.int32)
+                    #print("case 2:", start_index, ":", end_index, "@", self.epoch, ",", self.device_id)
+                self.length = len(self.sublist)
             #print("Sublist:{} {}-{}".format(self.sublist, start_index, end_index))
         self.raise_stop_after = False
         if self.shuffle:
-            if self.sublist is not None:
-                self.shuffle_indices = self.rng.permutation(self.sublist)
+            if self.original_sublist is not None:
+                self.sublist = self.rng.permutation(self.original_sublist)
             else:
-                self.shuffle_indices = self.rng.permutation(np.arange(self.length))
+                self.sublist = self.rng.permutation(self.length)
         return self
 
     def __next__(self):
 
-        if self.raise_stop_after or (self.i + self.batch_size - 1 >= self.length and self.last_batch_policy == LastBatchPolicy.DROP):
+        #print("using: ", self.particles, "at ", self.name)
+
+        if self.raise_stop_after or (self.i + self.batch_size - 1 >= self.length and self.last_batch_policy == LastBatchPolicy.DROP) or self.i >= self.length:
             if not self.last_batch_padded: 
                 start_index = self.length % self.batch_size # TODO: Check last_batch_padded_behavior
                 self.__iter__()
@@ -96,9 +119,9 @@ class LMDBClassIter:
                 self.raise_stop_after = True
                 cur_index = self.i % self.length
 
-            if self.shuffle:
-                cur_index = self.shuffle_indices[cur_index]
-            elif self.sublist is not None:
+            #if self.shuffle:
+            #    cur_index = self.shuffle_indices[cur_index]
+            if self.sublist is not None:
                 cur_index = self.sublist[cur_index]
 
             with self.env.begin(write=False) as txn:
@@ -116,27 +139,35 @@ class LMDBClassIter:
             #print("Device {} index {}".format(self.device_id, cur_index))
 
             if not self.output_augmentations:
-                return (batch, labels)
+                self.i += 1
+                continue
 
             if self.particles is not None:
                 if self.particles.ndim == 1:
                     augmentations.append(self.particles)
                 else:
-                    index = self.rng.choice(len(self.weights), 1, p=self.weights)
+                    index = self.rng.choice(len(self.weights), 1, p=self.weights)[0]
                     augmentations.append(self.particles[index])
             else:
                 augmentations.append(self.rng.permutation(self.ra_base))
 
             self.i += 1
 
+        if not self.output_augmentations:
+            return (batch, labels)
+
         return (batch, labels, augmentations)
 
     def __len__(self):
         return len(self.sublist) if self.sublist is not None else self.length
 
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+        #print("set epoch to", self.epoch)
+
 class RAOperations:
 
-    def __init__(self, magnitude, max_magnitude=30):
+    def __init__(self, device, magnitude, max_magnitude=30):
 
         self.magnitude = magnitude
         self.max_magnitude = max_magnitude
@@ -168,6 +199,21 @@ class RAOperations:
             return cond * aug_img + neg_cond * orig_img
 
         self.mux = mux
+
+        # Sharpness
+
+        cupy.cuda.Device(device).use()
+        self.smooth_kernel = 1 / 13 * cupy.array([1, 1, 1, 1, 5, 1, 1, 1, 1]).reshape((3, 3))
+
+        def sharpness_func(x):
+            a1 = cupy.fromDlpack(x)
+            result = cupy.empty_like(a1)
+            for i in range(3): 
+                result[i] = convolve2d(a1[i], self.smooth_kernel, mode="same")
+            cupy.cuda.get_current_stream().synchronize()
+            return result.toDlpack()
+
+        self.sharpness = sharpness_func
 
         # ShearX
         self.shearxp = partial(fn.warp_affine, device="gpu", matrix=(1, self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False)
@@ -231,6 +277,7 @@ def apply_ra(input, labels, augmentations, params):
     # Sharpness (Converted to Blur temporarily)
     shp = params.get_fparam(-0.9) * fn.random.coin_flip(probability=augmentations_5) + 1 #params.get_enhanced_fparam(1.0)
     images_4 = params.blend(fn.gaussian_blur(images_3, window_size=3, device="gpu"), images_3, shp)
+    #images_4 = params.blend(fn.dl_tensor_python_function(images_3, function=params.sharpness, device="gpu", synchronize_stream=True, batch_processing=False), images_3, shp)
 
     # ShearX
     sx = fn.random.coin_flip(probability=augmentations_6)
@@ -271,8 +318,9 @@ def apply_ra(input, labels, augmentations, params):
 
     # Convert to typical PyTorch input
     images_float = params.to_float(images_11) / 255
-    images_norm = params.normalize(images_float)
-    images_final = params.to_bchw(images_norm)
+    #images_norm = params.normalize(images_float)
+    #images_final = params.to_bchw(images_norm)
+    images_final = fn.crop_mirror_normalize(images_float, device="gpu", mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616], output_layout="CHW")
 
     return images_final, labels
 
@@ -284,20 +332,21 @@ def apply_cifar_val(input, labels):
     
     # Convert to typical PyTorch input
     images_float = fn.cast(images, device="gpu", dtype=types.DALIDataType.FLOAT) / 255
-    images_norm = fn.normalize(images_float, device="gpu", axes=[0, 1], batch=True)
-    images_final = fn.transpose(images_norm, device="gpu", perm=[2, 0, 1])
+    #images_norm = fn.normalize(images_float, device="gpu", axes=(0, 1), batch=True)
+    images_final = fn.crop_mirror_normalize(images_float, device="gpu", mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616], output_layout="CHW")
+    #images_final = fn.transpose(images_norm, device="gpu", perm=[2, 0, 1])
 
     return images_final, labels
 
 
 def LCRAPipeline(iterator, batch_size, num_threads, device_id, magnitude, max_magnitude=30):
     pipe = Pipeline(batch_size, num_threads, device_id)
-    params = RAOperations(magnitude, max_magnitude)
+    params = RAOperations(device_id, magnitude, max_magnitude)
 
     # TODO: Potential issues with prefetch and setting particles
 
     with pipe:
-        images, labels, augmentations = fn.external_source(iterator, num_outputs=3) # , cycle="raise")
+        images, labels, augmentations = fn.external_source(iterator, num_outputs=3, layout=["HWC"]) # , cycle="raise")
         out_images, out_labels = apply_ra(images, labels, augmentations, params)
         pipe.set_outputs(out_images, out_labels)
     return pipe
@@ -307,7 +356,7 @@ def LCRAValPipeline(iterator, batch_size, num_threads, device_id):
     pipe = Pipeline(batch_size, num_threads, device_id)
 
     with pipe:
-        images, labels = fn.external_source(iterator, num_outputs=2)
+        images, labels = fn.external_source(iterator, num_outputs=2, layout=["HWC"])
         out_images, out_labels = apply_cifar_val(images, labels)
         pipe.set_outputs(out_images, out_labels)
     return pipe
@@ -319,6 +368,6 @@ def get_lcra_train_iterator(path, batch_size, num_threads, device_id, num_gpus, 
     return pipeline, iterator
 
 def get_lcra_val_iterator(path, batch_size, num_threads, device_id, num_gpus, sublist=None):
-    iterator = LMDBClassIter(path, batch_size, device_id=device_id, num_gpus=num_gpus, shuffle=False, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True, sublist=sublist)
+    iterator = LMDBClassIter(path, batch_size, device_id=device_id, num_gpus=num_gpus, shuffle=False, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True, sublist=sublist, output_augmentations=False)
     pipeline = LCRAValPipeline(iterator, batch_size, num_threads, device_id)
     return pipeline, iterator
