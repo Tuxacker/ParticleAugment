@@ -9,7 +9,7 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 import lmdb
 import numpy as np
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR10, CIFAR100
 from tqdm import tqdm
 
 from utils.config_src import get_global_config
@@ -50,5 +50,8 @@ def export_classification_dataset(path, dataset, name="lmdb_dataset", write_freq
 if __name__ == "__main__":
 
     config = get_global_config()
-    dataset = CIFAR10(config.lmdb_export.lmdb_dataset_dir, train=sys.argv[1] == "train")
-    export_classification_dataset(config.lmdb_export.lmdb_dataset_dir, dataset, name=sys.argv[2])
+    if sys.argv[1] == "cifar10":
+        dataset = CIFAR10(config.lmdb_export.lmdb_dataset_dir, train=sys.argv[2] == "train")
+    elif sys.argv[1] == "cifar100":
+        dataset = CIFAR100(config.lmdb_export.lmdb_dataset_dir, train=sys.argv[2] == "train")
+    export_classification_dataset(config.lmdb_export.lmdb_dataset_dir, dataset, name=sys.argv[3])

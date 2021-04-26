@@ -15,27 +15,37 @@ lrs_params:
   warmup: False
   warmup_epochs: 5
 filter:
-  n_particles: 32
-  std: 0.025
-  lr: 0.1
+  n_particles: 50
+  std: 0.05
+  lr: 1
   resample_threshold: 0.8
-  interval: 2
+  interval: 1
   enabled: False
   print_policies_every: 5
-  only_good: True
+  only_good: False
+  extra_train: True
   good_threshold: 0.98
 sync_bn: False
-lr: 0.1
-epochs: 200
-ra_m: 15
+lr: 0.05
+epochs: 250
+ra_m: 5
+ra_n: 2
+ra_tf: "normal"
 resume: False
 evaluate: False
 test: False
 amp: True
 profile: -1
+data_threads: 2
+data_threads_pft: 2
+retrain_on_val_loss: False
+num_retries: 2
+reset_filter_on_val_loss: False
+retrain_acc_threshold: 1.0
+keep_epochs: 10
 debug_print_freq: 100
-validation_interval: 2
-dataloader: "dali"
+validation_interval: 1
+dataloader: "pim"
 train_dataset_path: "~/datasets/CIFAR/lmdb_dataset.lmdb"
 val_dataset_path: "~/datasets/CIFAR/cifar10-val.lmdb"
 

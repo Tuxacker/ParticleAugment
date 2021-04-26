@@ -718,9 +718,11 @@ def _select_rand_weights(weight_idx=0, transforms=None):
     return probs
 
 
-def rand_augment_ops(magnitude=10, hparams=None, transforms=None, p=0.5, mode=None):
+def rand_augment_ops(magnitude=10, hparams=None, transforms=None, p=0.5, mode=None, config=None):
     hparams = hparams or _HPARAMS_DEFAULT
     transforms = transforms or _RAND_TRANSFORMS
+    if config.ra_tf == "increasing":
+        transforms = _RAND_INCREASING_TRANSFORMS
     return [AugmentOp(
         name, prob=p, magnitude=magnitude, mode=mode, hparams=hparams) for name in transforms]
 
@@ -750,21 +752,19 @@ class RandAugment:
                 self.ops, self.num_layers, replace=self.choice_weights is None, p=self.choice_weights)
             for op in ops:
                 img = op(img)
-            return img
         else:
             if self.particles.ndim == 1:
-                rnd = self.rng.random(self.particles.shape[0], dtype=self.particles.dtype) >= self.particles
+                rnd = self.rng.random(self.particles.shape[0], dtype=self.particles.dtype) < self.particles
                 for op, apply in zip(self.ops, rnd):
                     if apply:
                         img = op(img)
-                return img
             else:
                 index = self.rng.choice(len(self.weights), 1, p=self.weights)[0]
-                rnd = self.rng.random(self.particles.shape[1], dtype=self.particles.dtype) >= self.particles[index]
+                rnd = self.rng.random(self.particles.shape[1], dtype=self.particles.dtype) < self.particles[index]
                 for op, apply in zip(self.ops, rnd):
                     if apply:
                         img = op(img)
-                return img
+        return img
 
     def get_op_statistics(self, show_called=False):
         return {op.name: op.count for op in self.ops} if not show_called else {op.name: op.called for op in self.ops}

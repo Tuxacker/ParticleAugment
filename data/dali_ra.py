@@ -11,7 +11,83 @@ from cupyx.scipy.signal import convolve2d
 from nvidia.dali.pipeline import Pipeline
 import nvidia.dali.types as types
 import nvidia.dali.fn as fn
+import nvidia.dali.math as dalimath
 from nvidia.dali.plugin.pytorch import LastBatchPolicy
+
+from numba import njit
+
+@njit
+def autocontrast(img):
+    for i in range(3):
+        black = np.min(img[:, :, i])
+        white = np.max(img[:, :, i])
+        img[:, :, i] = ((img[:, :, i] - black) * 255.0 /(white - black)).astype(np.uint8)
+    return img
+
+@njit
+def equalize(img):
+    size = img.shape[0] * img.shape[1]
+    for i in range(3):
+        h, _ = np.histogram(img[:, :, i].flatten(), bins=256, range=(0, 255))
+        csum = np.cumsum(h)
+        cmin = csum[(csum > 0).argmax()]
+        divisor = size - cmin
+        if divisor == 0:
+            continue
+        for k in range(img.shape[0]):
+            for j in range(img.shape[1]):
+                img[k, j, i] = round((csum[img[k, j, i]] - cmin) / divisor * 255.0)
+    return img
+
+@njit
+def random_erase(img):
+    area = img.shape[0] * img.shape[1]
+    for _ in range(10):
+        target_area = np.random.uniform(0.02, 1/3) * area
+        aspect_ratio = np.exp(np.random.uniform(-1.204, 1.204))
+        h = int(round(np.sqrt(target_area * aspect_ratio)))
+        w = int(round(np.sqrt(target_area / aspect_ratio)))
+        if w < img.shape[1] and h < img.shape[0]:
+            top = np.random.randint(0, img.shape[0] - h)
+            left = np.random.randint(0, img.shape[1] - w)
+            img[top:top + h, left:left + w] = 0
+            break
+    return img
+
+@njit
+def random_crop(img, padding=4):
+    paste = np.zeros((img.shape[0] + padding, img.shape[1] + padding, 3), dtype=np.uint8)
+    paste[padding:padding+img.shape[0], padding:padding+img.shape[1]] = img
+    t = np.random.randint(0, paste.shape[0] - img.shape[0] + 1)
+    l = np.random.randint(0, paste.shape[1] - img.shape[1] + 1)
+    img = paste[t:t+img.shape[0],l:l+img.shape[1]]
+    return img
+
+
+#@njit
+#def posterize(img, bits):
+#    return img & ~(2 ** (8-bits) - 1)
+
+#@njit
+#def invert(img):
+#    return 255 - img
+
+#@njit
+#def solarize(img):
+#    for i in range(3):
+#        for j in range(img.shape[1]):
+#            mask = np.greater_equal(img[:, j, i], 128)
+#            img[mask, j, i] = 255 - img[mask, j, i] 
+#    return img
+
+#@njit
+#def solarize_add(img, add):
+#    for i in range(3):
+#        for j in range(img.shape[1]):
+#            mask = np.less(img[:, j, i], 128)
+#            img[mask, j, i] = np.min(255, img[mask, j, i] + add) 
+#    return img
+
 
 
 class LMDBClassIter:
@@ -42,7 +118,8 @@ class LMDBClassIter:
         self.epoch = 0
         self.particles = particles
         self.weights = weights
-        self.ra_base = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        self.ra_base = np.zeros(12, dtype=np.float32)
+        self.ra_base[0:2] = 1.0
         self.output_augmentations = output_augmentations
         self.rng = np.random.default_rng(seed)
         self.seed = seed
@@ -151,6 +228,26 @@ class LMDBClassIter:
             else:
                 augmentations.append(self.rng.permutation(self.ra_base))
 
+            augmentations[-1] = 1 - (augmentations[-1] / (np.sum(augmentations[-1]) + 1))
+
+            #batch[-1] = random_crop(batch[-1]).astype(np.uint8)
+            #if self.rng.random() <= 0.5:
+            #    batch[-1] = random_erase(batch[-1]).astype(np.uint8)
+
+            #if len(augmentations[-1]) == 15:
+                #if self.rng.random() < augmentations[-1][-2]:
+                #    batch[-1] = autocontrast(batch[-1]).astype(np.uint8)
+                #if self.rng.random() < augmentations[-1][-1]:
+                #    batch[-1] = equalize(batch[-1]).astype(np.uint8)
+                #if self.rng.random() > augmentations[-1][-3]:
+                #    batch[-1] = posterize(batch[-1], 4).astype(np.uint8)
+                #if self.rng.random() > augmentations[-1][-3]:
+                #    batch[-1] = invert(batch[-1])
+                #if self.rng.random() > augmentations[-1][-2]:
+                #    batch[-1] = solarize(batch[-1])
+                #if self.rng.random() > augmentations[-1][-1]:
+                #    batch[-1] = solarize_add(batch[-1], 55)
+
             self.i += 1
 
         if not self.output_augmentations:
@@ -167,7 +264,7 @@ class LMDBClassIter:
 
 class RAOperations:
 
-    def __init__(self, device, magnitude, max_magnitude=30):
+    def __init__(self, device, magnitude, max_magnitude=10):
 
         self.magnitude = magnitude
         self.max_magnitude = max_magnitude
@@ -181,6 +278,12 @@ class RAOperations:
             return int(param * self.magnitude / self.max_magnitude)
 
         self.get_iparam = get_iparam
+
+        def get_enhanced_fparam_d():
+            signs = fn.random.coin_flip(probability=0.5) * 2 - 1
+            return (self.get_fparam(0.9) * signs + 1)
+
+        self.get_enhanced_fparam_d = get_enhanced_fparam_d
 
         def get_enhanced_fparam(probability):
             signs = fn.random.coin_flip(probability=0.5) * 2 - 1
@@ -202,34 +305,34 @@ class RAOperations:
 
         # Sharpness
 
-        cupy.cuda.Device(device).use()
-        self.smooth_kernel = 1 / 13 * cupy.array([1, 1, 1, 1, 5, 1, 1, 1, 1]).reshape((3, 3))
+        #cupy.cuda.Device(device).use()
+        #self.smooth_kernel = 1 / 13 * cupy.array([1, 1, 1, 1, 5, 1, 1, 1, 1]).reshape((3, 3))
 
-        def sharpness_func(x):
-            a1 = cupy.fromDlpack(x)
-            result = cupy.empty_like(a1)
-            for i in range(3): 
-                result[i] = convolve2d(a1[i], self.smooth_kernel, mode="same")
-            cupy.cuda.get_current_stream().synchronize()
-            return result.toDlpack()
+        #def sharpness_func(x):
+        #    a1 = cupy.fromDlpack(x)
+        #    result = cupy.empty_like(a1)
+        #    for i in range(3): 
+        #        result[i] = convolve2d(a1[i], self.smooth_kernel, mode="same")
+        #    cupy.cuda.get_current_stream().synchronize()
+        #    return result.toDlpack()
 
-        self.sharpness = sharpness_func
+        #self.sharpness = sharpness_func
 
         # ShearX
-        self.shearxp = partial(fn.warp_affine, device="gpu", matrix=(1, self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False)
-        self.shearxn = partial(fn.warp_affine, device="gpu", matrix=(1, -self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False)
+        self.shearxp = partial(fn.warp_affine, device="gpu", matrix=(1, self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False, fill_value=128)
+        self.shearxn = partial(fn.warp_affine, device="gpu", matrix=(1, -self.get_fparam(0.3), 0, 0, 1, 0), inverse_map=False, fill_value=128)
 
         # ShearY
-        self.shearyp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, self.get_fparam(0.3), 1, 0), inverse_map=False)
-        self.shearyn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, -self.get_fparam(0.3), 1, 0), inverse_map=False)
+        self.shearyp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, self.get_fparam(0.3), 1, 0), inverse_map=False, fill_value=128)
+        self.shearyn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, -self.get_fparam(0.3), 1, 0), inverse_map=False, fill_value=128)
 
         # TranslateX
-        self.trxp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, self.get_iparam(10), 0, 1, 0), inverse_map=False)
-        self.trxn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, -self.get_iparam(10), 0, 1, 0), inverse_map=False)
+        self.trxp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, self.get_iparam(10), 0, 1, 0), inverse_map=False, fill_value=128)
+        self.trxn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, -self.get_iparam(10), 0, 1, 0), inverse_map=False, fill_value=128)
 
         # TranslateY
-        self.tryp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, 0, 1, self.get_iparam(10)), inverse_map=False)
-        self.tryn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, 0, 1, -self.get_iparam(10)), inverse_map=False)
+        self.tryp = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, 0, 1, self.get_iparam(10)), inverse_map=False, fill_value=128)
+        self.tryn = partial(fn.warp_affine, device="gpu", matrix=(1, 0, 0, 0, 1, -self.get_iparam(10)), inverse_map=False, fill_value=128)
 
         # RandomCrop
         self.crop = partial(fn.random_resized_crop, device="gpu", size=[32, 32], random_area=[float((7/8)**2), 1.0])
@@ -237,90 +340,177 @@ class RAOperations:
         # Thumbnail
         self.thumbnail = partial(fn.resize, device="gpu", size=[8, 8])
 
+        # Posterize
+        self.bitmask = types.Constant(~(2 ** (8-self.get_iparam(4)) - 1)).uint8()
+
         # UINT8->F32
         self.to_float = partial(fn.cast, device="gpu", dtype=types.DALIDataType.FLOAT)
         self.to_bchw = partial(fn.transpose, device="gpu", perm=[2, 0, 1]) # axes are already in "WH" format
         self.normalize = partial(fn.normalize, device="gpu", axes=[0, 1], batch=True) #, mean=[0.4914, 0.4822, 0.4465], stddev=[0.2470, 0.2435, 0.2616])
 
 
-def apply_ra(input, labels, augmentations, params):
+def apply_cifar_pre(input, labels):
+    images = input.gpu()
+    labels = labels.gpu()
+
+    # Horizontal Flip
+    # images_flip = fn.flip(images, horizontal=fn.random.coin_flip(probability=0.5), device="gpu")
+    images_flip = images
+
+    return images_flip, labels
+
+def apply_ra_single(input, labels, augmentation_list, params):
 
     images = input.gpu()
     labels = labels.gpu()
-    augmentations_1 = fn.element_extract(augmentations, element_map=0)
-    augmentations_2 = fn.element_extract(augmentations, element_map=1)
-    augmentations_3 = fn.element_extract(augmentations, element_map=2)
-    augmentations_4 = fn.element_extract(augmentations, element_map=3)
-    augmentations_5 = fn.element_extract(augmentations, element_map=4)
-    augmentations_6 = fn.element_extract(augmentations, element_map=5)
-    augmentations_7 = fn.element_extract(augmentations, element_map=6)
-    augmentations_8 = fn.element_extract(augmentations, element_map=7)
-    augmentations_9 = fn.element_extract(augmentations, element_map=8)
-    augmentations_10 = fn.element_extract(augmentations, element_map=9)
+
+    augmented_images = []
+
+    augmented_images.append(fn.rotate(images, angle=params.get_fparam(30.0), device="gpu", keep_size=True, fill_value=128))
+
+    augmented_images.append(fn.hsv(images, saturation=params.get_enhanced_fparam_d(), device="gpu"))
+
+    augmented_images.append(fn.contrast(images, contrast=params.get_enhanced_fparam_d(), device="gpu"))
+
+    augmented_images.append(fn.brightness(images, brightness=params.get_enhanced_fparam_d(), device="gpu"))
+
+    sxsign = fn.random.coin_flip(probability=0.5)
+    augmented_images.append(params.mux(sxsign, params.shearxp(images), params.shearxn(images)))
+
+    sysign = fn.random.coin_flip(probability=0.5)
+    augmented_images.append(params.mux(sysign, params.shearyp(images), params.shearyn(images)))
+
+    txsign = fn.random.coin_flip(probability=0.5)
+    augmented_images.append(params.mux(txsign, params.trxp(images), params.trxn(images)))
+
+    tysign = fn.random.coin_flip(probability=0.5)
+    augmented_images.append(params.mux(tysign, params.tryp(images), params.tryn(images)))
+
+    augmented_images.append(255 - images)
+
+    sol_mask = images > 127
+    augmented_images.append(params.mux(sol_mask, augmented_images[-1], images))
+
+    augmented_images.append(images & params.bitmask)
+
+    images_float = params.to_float(images) / 255
+
+    images_shp = params.blend(fn.gaussian_blur(images_float, window_size=3, device="gpu"), images_float, params.get_enhanced_fparam_d())
+    augmented_images.append(fn.cast(dalimath.clamp(images_shp, 0.0, 1.0) * 255.0, device="gpu", dtype=types.DALIDataType.UINT8))
+
+    for i in range(12):
+        weights = fn.element_extract(augmentation_list, element_map=i)
+        images = params.blend(augmented_images[i], images, weights)
+
+    images_float = params.to_float(images) / 255
+
+    images_final = fn.crop_mirror_normalize(images_float, device="gpu", mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616], output_layout="CHW")
+
+    return images_final, labels
+
+
+def apply_ra(input, labels, augmentation_list, params):
+
+    images, labels = apply_cifar_pre(input, labels)
+
+    augmentations = []
+    for i in range(14):
+        augmentations.append(fn.element_extract(augmentation_list, element_map=i))
+
+    #augmentations_1 = fn.element_extract(augmentations, element_map=0)
+    #augmentations_2 = fn.element_extract(augmentations, element_map=1)
+    #augmentations_3 = fn.element_extract(augmentations, element_map=2)
+    #augmentations_4 = fn.element_extract(augmentations, element_map=3)
+    #augmentations_5 = fn.element_extract(augmentations, element_map=4)
+    #augmentations_6 = fn.element_extract(augmentations, element_map=5)
+    #augmentations_7 = fn.element_extract(augmentations, element_map=6)
+    #augmentations_8 = fn.element_extract(augmentations, element_map=7)
+    #augmentations_9 = fn.element_extract(augmentations, element_map=8)
+    #augmentations_10 = fn.element_extract(augmentations, element_map=9)
+    #augmentations_11 = fn.element_extract(augmentations, element_map=10)
+    #augmentations_12 = fn.element_extract(augmentations, element_map=11)
+    #augmentations_13 = fn.element_extract(augmentations, element_map=12)
+    #augmentations_14 = fn.element_extract(augmentations, element_map=13)
 
     # Rotation
-    angle = params.get_fparam(30.0) * fn.random.coin_flip(probability=augmentations_1)
-    images_0 = fn.rotate(images, angle=angle, device="gpu", keep_size=True)
+    angle = params.get_fparam(30.0) * fn.random.coin_flip(probability=augmentations[0])
+    images_0 = fn.rotate(images, angle=angle, device="gpu", keep_size=True, fill_value=128)
 
     # Saturation
-    sat = params.get_enhanced_fparam(augmentations_2)
+    sat = params.get_enhanced_fparam(augmentations[1])
     images_1 = fn.hsv(images_0, saturation=sat, device="gpu")
 
     # Contrast
-    cont = params.get_enhanced_fparam(augmentations_3)
+    cont = params.get_enhanced_fparam(augmentations[2])
     images_2 = fn.contrast(images_1, contrast=cont, device="gpu")
 
     # Brightness
-    brt = params.get_enhanced_fparam(augmentations_4)
-    images_3 = fn.brightness(images_2, brightness=brt, device="gpu")
-
-    # Sharpness (Converted to Blur temporarily)
-    shp = params.get_fparam(-0.9) * fn.random.coin_flip(probability=augmentations_5) + 1 #params.get_enhanced_fparam(1.0)
-    images_4 = params.blend(fn.gaussian_blur(images_3, window_size=3, device="gpu"), images_3, shp)
-    #images_4 = params.blend(fn.dl_tensor_python_function(images_3, function=params.sharpness, device="gpu", synchronize_stream=True, batch_processing=False), images_3, shp)
+    brt = params.get_enhanced_fparam(augmentations[3])
+    images_4 = fn.brightness(images_2, brightness=brt, device="gpu")
 
     # ShearX
-    sx = fn.random.coin_flip(probability=augmentations_6)
+    sx = fn.random.coin_flip(probability=augmentations[5])
     sxsign = fn.random.coin_flip(probability=0.5)
     img_sx = params.mux(sxsign, params.shearxp(images_4), params.shearxn(images_4))
     images_5 = params.mux(sx, img_sx, images_4)
 
     # ShearY
-    sy = fn.random.coin_flip(probability=augmentations_7)
+    sy = fn.random.coin_flip(probability=augmentations[6])
     sysign = fn.random.coin_flip(probability=0.5)
     img_sy = params.mux(sysign, params.shearyp(images_5), params.shearyn(images_5))
     images_6 = params.mux(sy, img_sy, images_5)
 
     # TranslateX
-    tx = fn.random.coin_flip(probability=augmentations_8)
+    tx = fn.random.coin_flip(probability=augmentations[7])
     txsign = fn.random.coin_flip(probability=0.5)
     img_tx = params.mux(txsign, params.trxp(images_6), params.trxn(images_6))
     images_7 = params.mux(tx, img_tx, images_6)
 
     # TranslateY
-    ty = fn.random.coin_flip(probability=augmentations_9)
+    ty = fn.random.coin_flip(probability=augmentations[8])
     tysign = fn.random.coin_flip(probability=0.5)
     img_ty = params.mux(tysign, params.tryp(images_7), params.tryn(images_7))
-    images_8 = params.mux(ty, img_ty, images_7)
+    images_8 = fn.cast(params.mux(ty, img_ty, images_7), dtype=types.DALIDataType.UINT8)
 
     # Random Crop
-    images_9 = params.crop(images_8)
+    images_11 = images_8 # params.crop(images_8)
 
-    to_flip = fn.random.coin_flip(probability=0.5)
-    images_10 = fn.flip(images_9, horizontal=to_flip, device="gpu")
+    #images_thumb = params.thumbnail(images)
+    #thumb_patches = fn.paste(images_thumb, paste_x=fn.random.uniform(range=[0.0, 0.75]), paste_y=fn.random.uniform(range=[0.0, 0.75]), ratio=4, fill_value=0, device="gpu") 
+    #thumb_mask = thumb_patches > 0
+    #thumb_blend = params.mux(thumb_mask, thumb_patches, images_9)
+    #use_thumb = fn.random.coin_flip(probability=augmentations_10)
+    #images_11 = params.mux(use_thumb, thumb_blend, images_9)
 
-    images_thumb = params.thumbnail(images)
-    thumb_patches = fn.paste(images_thumb, paste_x=fn.random.uniform(range=[0.0, 0.75]), paste_y=fn.random.uniform(range=[0.0, 0.75]), ratio=4, fill_value=0, device="gpu") 
-    thumb_mask = thumb_patches > 0
-    thumb_blend = params.mux(thumb_mask, thumb_patches, images_10)
-    use_thumb = fn.random.coin_flip(probability=augmentations_10)
-    images_11 = params.mux(use_thumb, thumb_blend, images_10)
+    # Invert
+    images_inverted = 255 - images_11
+    use_inv = fn.random.coin_flip(probability=augmentations[10])
+    images_12 = params.mux(use_inv, images_inverted, images_11)
+
+    # Solarize
+    images_inverted_2 = 255 - images_12
+    sol_mask = images_12 > 127
+    images_sol = params.mux(sol_mask, images_inverted_2, images_12)
+
+    use_sol = fn.random.coin_flip(probability=augmentations[11])
+    images_13 = params.mux(use_sol, images_sol, images_12)
+
+    # Posterize
+    images_posterized =  fn.cast(images_13, device="gpu", dtype=types.DALIDataType.UINT8) & params.bitmask
+    use_posterize = fn.random.coin_flip(probability=augmentations[12])
+    images_14 = params.mux(use_posterize, images_posterized, images_13)
 
     # Convert to typical PyTorch input
-    images_float = params.to_float(images_11) / 255
+    images_float = params.to_float(images_14) / 255
+
+    # Sharpness (Converted to Blur temporarily)
+    shp = params.get_enhanced_fparam(augmentations[4]) #params.get_fparam(-0.9) * fn.random.coin_flip(probability=augmentations_5) + 1 #params.get_enhanced_fparam(1.0)
+    images_float_2 = params.blend(fn.gaussian_blur(images_float, window_size=3, device="gpu"), images_float, shp)
+    images_float_3 = dalimath.clamp(images_float_2, 0.0, 1.0)
+
     #images_norm = params.normalize(images_float)
     #images_final = params.to_bchw(images_norm)
-    images_final = fn.crop_mirror_normalize(images_float, device="gpu", mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616], output_layout="CHW")
+    images_final = fn.crop_mirror_normalize(images_float_3, device="gpu", mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616], output_layout="CHW")
 
     return images_final, labels
 
@@ -339,7 +529,7 @@ def apply_cifar_val(input, labels):
     return images_final, labels
 
 
-def LCRAPipeline(iterator, batch_size, num_threads, device_id, magnitude, max_magnitude=30):
+def LCRAPipeline(iterator, batch_size, num_threads, device_id, magnitude, max_magnitude=10):
     pipe = Pipeline(batch_size, num_threads, device_id)
     params = RAOperations(device_id, magnitude, max_magnitude)
 
@@ -347,7 +537,7 @@ def LCRAPipeline(iterator, batch_size, num_threads, device_id, magnitude, max_ma
 
     with pipe:
         images, labels, augmentations = fn.external_source(iterator, num_outputs=3, layout=["HWC"]) # , cycle="raise")
-        out_images, out_labels = apply_ra(images, labels, augmentations, params)
+        out_images, out_labels = apply_ra_single(images, labels, augmentations, params)
         pipe.set_outputs(out_images, out_labels)
     return pipe
 
@@ -362,7 +552,7 @@ def LCRAValPipeline(iterator, batch_size, num_threads, device_id):
     return pipe
 
 
-def get_lcra_train_iterator(path, batch_size, num_threads, device_id, num_gpus, magnitude, shuffle=True, last_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None, max_magnitude=30):
+def get_lcra_train_iterator(path, batch_size, num_threads, device_id, num_gpus, magnitude, shuffle=True, last_batch_policy=LastBatchPolicy.DROP, last_batch_padded=False, sublist=None, max_magnitude=10):
     iterator = LMDBClassIter(path, batch_size, device_id=device_id, num_gpus=num_gpus, shuffle=shuffle, last_batch_policy=last_batch_policy, last_batch_padded=last_batch_padded, sublist=sublist)
     pipeline = LCRAPipeline(iterator, batch_size, num_threads, device_id, magnitude, max_magnitude=max_magnitude)
     return pipeline, iterator

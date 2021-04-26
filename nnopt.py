@@ -1,4 +1,5 @@
 import argparse
+import glob
 #from contextlib import ContextDecorator
 import os
 import shutil
@@ -36,10 +37,12 @@ from components.optimizer_factory import optimizer_from_config
 from components.lrs_factory import lrs_from_config
 from data.dali_ra import get_lcra_train_iterator, get_lcra_val_iterator
 from data.pim_loader import get_cifar_10_train_loader, get_cifar_10_val_loader
+from data.pim_ra import RandAugment
 from utils.config_src import get_global_config
 
 
 def main(local_rank=-1, world_size=1, overrides=None):
+    start_time = time.time()
 
     global best_prec1, _args, config, logger
 
@@ -52,9 +55,9 @@ def main(local_rank=-1, world_size=1, overrides=None):
     suffix = "" if local_rank == -1 else "_r" + str(local_rank)
 
     file_name = datetime.datetime.now().strftime("%y%m%d%H%M%S") + suffix + ".log"
-    work_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work_dir")
-    Path(work_dir).mkdir(parents=True, exist_ok=True)
-    log_path = os.path.join(work_dir, file_name) 
+    #work_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work_dir")
+    #Path(work_dir).mkdir(parents=True, exist_ok=True)
+    log_path = file_name # os.path.join(work_dir, file_name) 
 
     fileHandler = logging.FileHandler(log_path)
     fileHandler.setFormatter(logFormatter)
@@ -176,26 +179,33 @@ def main(local_rank=-1, world_size=1, overrides=None):
             dist.barrier()
         resume()
 
-    # TODO: Mayber change DALI iterator reset trigger to config setting
+    # TODO: Maybe change DALI iterator reset trigger to config setting
     if config.dataloader == "dali":
-        trainp, train_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True)
+        trainp, train_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True)
         trainp.build()
         train_loader = DALIClassificationIterator(trainp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
 
-        valp, val_iterator = get_lcra_val_iterator(config.val_dataset_path, config.batch_size, 16, config.device_id, config.world_size)
+        if config.filter.extra_train:
+            filtp, filtrain_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True, sublist=list(range(config.batch_size*200)))
+            filtp.build()
+            filtrain_loader = DALIClassificationIterator(filtp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
+
+        valp, val_iterator = get_lcra_val_iterator(config.val_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
         valp.build()
         val_loader = DALIClassificationIterator(valp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True)
 
-        filp, fil_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True, shuffle=False, sublist=list(range(config.batch_size*4)))
+        filp, fil_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True, shuffle=False, sublist=list(range(config.batch_size*4)))
         filp.build()
         fil_loader = DALIClassificationIterator(filp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True, prepare_first_batch=False)
         #fil_iterator.name = "fil_iterator
     elif config.dataloader == "pim":
-        train_loader, train_iterator = get_cifar_10_train_loader(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m)
-        val_loader = get_cifar_10_val_loader(config.val_dataset_path, config.batch_size, 16, config.device_id, config.world_size)
+        train_loader, train_iterator = get_cifar_10_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
+        if config.filter.extra_train:
+            filtrain_loader, filtrain_iterator = get_cifar_10_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads_pft, config.device_id, config.world_size, subset=list(range(config.batch_size*200)))
+        val_loader = get_cifar_10_val_loader(config, config.val_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
         val_iterator = None
         indices = train_loader.dataset.get_balanced_subset(config.batch_size*4)
-        fil_loader, fil_iterator = get_cifar_10_train_loader(config.train_dataset_path, config.batch_size, 16, config.device_id, config.world_size, config.ra_m, subset=indices)
+        fil_loader, fil_iterator = get_cifar_10_train_loader(config, config.train_dataset_path, config.batch_size, 0, config.device_id, config.world_size, subset=indices)
 
 
     if config.evaluate:
@@ -208,12 +218,37 @@ def main(local_rank=-1, world_size=1, overrides=None):
 
     logger.info("Initial LR: {}".format(optimizer.param_groups[0]["lr"]))
 
-    for epoch in range(config.start_epoch, config.epochs):
+    epoch = config.start_epoch
+
+    prec1_hist = []
+    saved_val_epochs = []
+
+    #move_old()
+
+    def reload_checkpoint(filename, prefix="default"):
+        checkpoint = torch.load(filename, map_location = lambda storage, loc: storage.cuda(config.device_id))
+        model.load_state_dict(checkpoint['state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+        p_filter.load_state_dict(checkpoint['pf'])
+        prec1_hist = checkpoint['prec1_hist']
+        saved_val_epochs = checkpoint['saved_val_epochs']
+        if checkpoint['scaler'] is not None:
+            scaler.load_state_dict(checkpoint['scaler'])
+        logger.info("[{}]=> loaded checkpoint '{}' (epoch {})"
+                .format(prefix, filename, checkpoint['epoch'] + 1))
+        return checkpoint['epoch'], prec1_hist, saved_val_epochs
+
+    retry_epoch = -1
+    num_retries = 0
+
+    while epoch < config.epochs:
         # train for one epoch
         if config.dataloader == "dali":
             train_iterator.set_epoch(epoch)
         p_filter.epoch = epoch
-        p_filter.p_enter(epoch, config.filter.enabled)
+        if not config.filter.extra_train:
+            p_filter.p_enter(epoch, config.filter.enabled)
 
         if config.distributed:
             dist.barrier()
@@ -223,7 +258,36 @@ def main(local_rank=-1, world_size=1, overrides=None):
         if config.distributed:
             dist.barrier()
 
-        p_filter.p_exit(epoch, config.filter.enabled)
+        if config.local_rank == 0:
+
+            save_checkpoint({
+                'epoch': epoch,
+                'state_dict': model.state_dict(),
+                'best_prec1': best_prec1,
+                'optimizer' : optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'scaler': scaler.state_dict(),
+                'pf': p_filter.state_dict(),
+                'prec1_hist': prec1_hist,
+                'saved_val_epochs': saved_val_epochs
+            })
+
+            retain_latest(to_keep=config.keep_epochs)
+
+        if config.distributed:
+            dist.barrier()
+
+        if not config.filter.extra_train:
+            p_filter.p_exit(epoch, config.filter.enabled)
+        elif epoch > config.start_epoch and config.filter.enabled and epoch % config.filter.interval == 0:
+            p_filter.p_enter(epoch, config.filter.enabled)
+            avg_train_time = train(filtrain_loader, filtrain_iterator, model, criterion, optimizer, lr_scheduler, epoch, scaler)
+            p_filter.p_exit(epoch, config.filter.enabled)
+            if config.filter.enabled and epoch % config.filter.interval == 0:
+                reload_checkpoint(get_latest(), "pf")
+            if type(filtrain_loader) == DALIClassificationIterator or type(filtrain_loader) == DALIGenericIterator:
+                filtrain_loader.reset()
+
         total_time.update(avg_train_time)
         if config.test:
             break
@@ -235,33 +299,84 @@ def main(local_rank=-1, world_size=1, overrides=None):
             # evaluate on validation set
             [prec1, prec5, _] = validate(val_loader, val_iterator, model, criterion)
             # remember best prec@1 and save checkpoint
+            is_best = prec1 > best_prec1
+            prec1_hist.append(prec1)
+            saved_val_epochs.append(epoch)
+            best_prec1 = max(prec1, best_prec1)
             if config.local_rank == 0:
-                is_best = prec1 > best_prec1
-                best_prec1 = max(prec1, best_prec1)
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
-                    'best_prec1': best_prec1,
-                    'optimizer' : optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'scaler': scaler.state_dict()
-                }, is_best)
-                if epoch == config.epochs - 1:
-                    logger.info('##Top-1 {0}\n'
-                        '##Top-5 {1}\n'
-                        '##Perf  {2}'.format(
-                        prec1,
-                        prec5,
-                        config.total_batch_size / total_time.avg))
+                copy_best(is_best)
+            if epoch == config.epochs - 1:
+                logger.info('##Top-1 {0}\n'
+                    '##Top-5 {1}\n'
+                    '##Perf  {2}'.format(
+                    best_prec1,
+                    prec5,
+                    config.total_batch_size / total_time.avg))
+                elapsed = time.time() - start_time
+                logger.info("Total runtime: {:.2f}s (GPU seconds: {:.2f}s, {} GPUs)".format(elapsed, elapsed * world_size, world_size))
             if type(val_loader) == DALIClassificationIterator or type(val_loader) == DALIGenericIterator:
                 val_loader.reset()
         if type(train_loader) == DALIClassificationIterator or type(train_loader) == DALIGenericIterator:
             train_loader.reset()
-        
+
         if config.distributed:
             dist.barrier()
 
+        if config.local_rank == 0:
+
+            save_checkpoint({
+                'epoch': epoch,
+                'state_dict': model.state_dict(),
+                'best_prec1': best_prec1,
+                'optimizer' : optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'scaler': scaler.state_dict(),
+                'pf': p_filter.state_dict(),
+                'prec1_hist': prec1_hist,
+                'saved_val_epochs': saved_val_epochs
+            })
+
+        if config.distributed:
+            dist.barrier()
+
+        if (epoch % config.validation_interval == 0 or epoch == config.epochs - 1) and len(prec1_hist) > 1 and config.retrain_on_val_loss:
+            if prec1_hist[-1] - prec1_hist[-2] < - config.retrain_acc_threshold * min(1, num_retries):
+                if epoch != retry_epoch:
+                    retry_epoch = epoch
+                    num_retries = 1
+                else:
+                    num_retries += 1
+                if num_retries > config.num_retries and not config.reset_filter_on_val_loss:
+                    retry_epoch = -1
+                    num_retries = 0
+                else:
+                    logger.info("Reloading epoch {}".format(saved_val_epochs[-2] + 1))
+                    #logger.info(prec1_hist)
+                    #logger.info(saved_val_epochs)
+                    epoch, prec1_hist, saved_val_epochs = reload_checkpoint("checkpoint-e{:04d}.pth.tar".format(saved_val_epochs[-2] + 1), "acc_drop")
+                    if config.local_rank == 0:
+                        checkpoints = sorted(glob.glob("checkpoint-e*.pth.tar"))
+                        #logger.info(prec1_hist)
+                        #logger.info(saved_val_epochs)
+                        #logger.info(checkpoints)
+                        #logger.info(checkpoints.index("checkpoint-e{:04d}.pth.tar".format(saved_val_epochs[-1] + 1))+1)
+                        for file in checkpoints[checkpoints.index("checkpoint-e{:04d}.pth.tar".format(saved_val_epochs[-1] + 1))+1:]:
+                            if os.path.exists(file):
+                                logger.info("[acc drop] Removing {}".format(file))
+                                os.remove(file)
+
+                    if num_retries > config.num_retries:
+                        p_filter.init_particles()
+                        num_retries = 0
+            
+                    if config.distributed:
+                        dist.barrier()
+
+        epoch += 1
+
 def train(train_loader, train_iterator, model, criterion, optimizer, lr_scheduler, epoch, scaler=None):
+    #import cProfile, pstats
+    #pr = cProfile.Profile()
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -272,7 +387,9 @@ def train(train_loader, train_iterator, model, criterion, optimizer, lr_schedule
     end = time.time()
     epoch_start_time = time.time()
 
+    #pr.enable()
     for i, data in enumerate(train_loader):
+        #pr.disable()
         if config.dataloader == "dali":
             input = data[0]["data"]
             target = data[0]["label"].squeeze(-1).long()
@@ -359,6 +476,8 @@ def train(train_loader, train_iterator, model, criterion, optimizer, lr_schedule
             logger.info("Profiling ended at iteration {}".format(i))
             torch.cuda.cudart().cudaProfilerStop()
             quit()
+        #pr.enable()
+    #pr.disable()
 
     logger.info('Epoch: [{}]\t\tElapsed {:.3f}, LR:{}'.format(epoch + 1, time.time() - epoch_start_time, optimizer.param_groups[0]["lr"]))
 
@@ -368,9 +487,13 @@ def train(train_loader, train_iterator, model, criterion, optimizer, lr_schedule
 
     lr_scheduler.step()
 
+    #pr.print_stats(sort=pstats.SortKey.CUMULATIVE)
+
     return batch_time.avg
 
 def validate(val_loader, val_iterator, model, criterion, suppress_output=False, calc_acc=True):
+    #import cProfile, pstats
+    #pr = cProfile.Profile()
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -381,7 +504,9 @@ def validate(val_loader, val_iterator, model, criterion, suppress_output=False, 
 
     end = time.time()
 
+    #pr.enable()
     for i, data in enumerate(val_loader):
+        #pr.disable()
         if config.dataloader == "dali":
             input = data[0]["data"]
             target = data[0]["label"].squeeze(-1).long()
@@ -431,18 +556,53 @@ def validate(val_loader, val_iterator, model, criterion, suppress_output=False, 
                    config.world_size * config.batch_size / batch_time.avg,
                    batch_time=batch_time, loss=losses,
                    top1=top1, top5=top5))
+        #pr.enable()
+    #pr.disable()
 
     if not suppress_output:
         logger.info("  Val: Loss:{loss.avg:6.4f} Acc@1: {top1.avg:5.3f}, Acc@5: {top5.avg:5.3f}"
             .format(loss=losses, top1=top1, top5=top5))
 
+    #pr.print_stats(sort=pstats.SortKey.CUMULATIVE)
+
     return [top1.avg, top5.avg, losses.val]
 
+def retain_latest(filename='checkpoint*.pth.tar', to_keep=10):
+    if to_keep < config.validation_interval:
+        raise ValueError("Not keeping enough epochs: {} < {}".format(to_keep, config.validation_interval))
+    file_list = sorted(glob.glob(filename))
+    if len(file_list) > to_keep:
+        for file in file_list[:-5]:
+            os.remove(file)
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    torch.save(state, filename)
+def get_latest(filename='checkpoint*.pth.tar'):
+    file_list = sorted(glob.glob(filename))
+    return file_list[-1]
+
+def move_old():
+    file_list = sorted(glob.glob("checkpoint*.pth.tar"))
+    best_exists = os.path.exists("model_best.pth.tar")
+    if len(file_list) > 0 or best_exists:
+        folder_name = datetime.datetime.now().strftime("%y%m%d%H%M%S") + "-backup"
+        os.mkdir(folder_name)
+        if len(file_list) > 0:
+            logger.info("Moving old checkpoints to {}".format(folder_name))
+            for file in file_list:
+                shutil.move(file, os.path.join(folder_name, file))
+        if best_exists:
+            logger.info("Moving old best checkpoint to {}".format(folder_name))
+            file = "model_best.pth.tar"
+            shutil.move(file, os.path.join(folder_name, file))
+
+def save_checkpoint(state, filename='checkpoint-e{:04d}.pth.tar'):
+    torch.save(state, filename.format(state["epoch"] + 1))
+
+def copy_best(is_best, filename='checkpoint*.pth.tar'):
+    file_list = sorted(glob.glob(filename))
+    filename_newest = file_list[-1]
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        logger.info("Copying {} to model_best.pth.tar".format(filename_newest))
+        shutil.copyfile(filename_newest, 'model_best.pth.tar')
 
 
 class AverageMeter(object):
@@ -471,7 +631,7 @@ class ParticleFilter: #(ContextDecorator):
         self.test_loader = test_loader
         self.test_iter = test_iter
         self.loss = loss
-        self.n_states = 10 if config.dataloader == "dali" else 15
+        self.n_states = 12 if config.dataloader == "dali" else 15
         self.particles = np.zeros((config.filter.n_particles, self.n_states), dtype=np.float32)
         self.weights = np.ones(config.filter.n_particles, dtype=np.float32) / config.filter.n_particles
         self.rng = np.random.default_rng(seed)
@@ -480,11 +640,20 @@ class ParticleFilter: #(ContextDecorator):
         self.new_losses = np.zeros((config.filter.n_particles + 1), dtype=np.float32)
         self.epoch = 0
 
+    def state_dict(self):
+        return {"particles": self.particles, "weights": self.weights, "n_states": self.n_states}
+
+    def load_state_dict(self, state_dict):
+        self.particles = state_dict["particles"]
+        self.weights = state_dict["weights"]
+        self.n_states = state_dict["n_states"]
+
     def init_particles(self):
+        self.weights = np.ones(config.filter.n_particles, dtype=np.float32) / config.filter.n_particles
         for i in range(config.filter.n_particles):
-            indices = self.rng.choice(self.n_states, 2, replace=False)
+            indices = self.rng.choice(self.n_states, config.ra_n, replace=False)
             for index in indices:
-                self.particles[i, index] = 1.0
+                self.particles[i, index] = 0.5
 
     def add_noise(self):
          self.particles += self.rng.normal(0.0, config.filter.std, self.particles.shape)
@@ -529,6 +698,7 @@ class ParticleFilter: #(ContextDecorator):
         self.epoch = epoch
         if not enabled or self.epoch % config.filter.interval != 0:
             return
+        start = time.time()
         logger.info("Epoch: [{}/{}] Filter step part 1/2".format(self.epoch + 1, config.epochs))
         self.add_noise()
         if config.distributed:
@@ -537,11 +707,14 @@ class ParticleFilter: #(ContextDecorator):
             self.old_losses[i] = self.eval_policy(i)
         self.train_iter.particles = self.particles
         self.train_iter.weights = self.weights
+        logger.info("Epoch: [{}/{}] Filter step part 1/2 elapsed: {}".format(self.epoch + 1, config.epochs, time.time() - start))
+
         
     def p_exit(self, epoch=0, enabled=True):
         self.epoch = epoch
         if not enabled or self.epoch % config.filter.interval != 0:
             return
+        start = time.time()
         logger.info("Epoch: [{}/{}] Filter step part 2/2".format(self.epoch + 1, config.epochs))
         for i in range(-1, config.filter.n_particles):
             self.new_losses[i] = self.eval_policy(i)
@@ -566,6 +739,7 @@ class ParticleFilter: #(ContextDecorator):
             self.train_iter.weights = self.weights
         if self.epoch % config.filter.print_policies_every == 0:
             print_current_policies(self.particles, self.weights)
+        logger.info("Epoch: [{}/{}] Filter step part 2/2 elapsed: {}".format(self.epoch + 1, config.epochs, time.time() - start))
 
 
 def adjust_learning_rate(optimizer, epoch, step, len_epoch):
@@ -674,6 +848,15 @@ if __name__ == '__main__':
             merge_dict_entry(overrides, temp_dict)
     else:
         overrides = None
+
+    folder_name = datetime.datetime.now().strftime("%y%m%d%H%M%S")
+    Path(folder_name).mkdir(parents=True, exist_ok=True)
+    os.chdir(folder_name)
+    if len(glob.glob("*")) > 0:
+        Path("backup").mkdir(parents=True, exist_ok=True)
+        for file in glob.glob("*"):
+            if file != "backup":
+                shutil.move(file, os.path.join("backup", file))
 
     if len(sys.argv) > 1 and int(sys.argv[1]) > 1:
         torchmp.start_processes(main, nprocs=int(sys.argv[1]), args=(int(sys.argv[1]), overrides), start_method="forkserver")

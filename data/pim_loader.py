@@ -78,9 +78,9 @@ class ClassLMDB(Dataset):
 
 
 
-def get_cifar_10_train_tf(magnitude):
-    ops = rand_augment_ops(magnitude=magnitude)
-    ra_instance = RandAugment(ops, 2)
+def get_cifar_10_train_tf(config):
+    ops = rand_augment_ops(config=config)
+    ra_instance = RandAugment(ops, config.ra_n)
     return transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -97,14 +97,14 @@ def get_cifar_10_val_tf():
     ])
 
 
-def get_cifar_10_train_loader(path, batch_size, num_threads, device_id, num_gpus, magnitude, subset=None, seed=0):
-    transform, ra_instance = get_cifar_10_train_tf(magnitude)
+def get_cifar_10_train_loader(config, path, batch_size, num_threads, device_id, num_gpus, subset=None, seed=0):
+    transform, ra_instance = get_cifar_10_train_tf(config)
     dataset = ClassLMDB(path, transform, subset=subset)
     sampler = DistributedSampler(dataset, num_replicas=num_gpus, rank=device_id, seed=seed) if num_gpus > 1 else None
     shuffle = None if num_gpus > 1 else True
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_threads, pin_memory=True), ra_instance
 
-def get_cifar_10_val_loader(path, batch_size, num_threads, device_id, num_gpus):
+def get_cifar_10_val_loader(config, path, batch_size, num_threads, device_id, num_gpus):
     transform = get_cifar_10_val_tf()
     dataset = ClassLMDB(path, transform)
     sampler = DistributedSampler(dataset, num_replicas=num_gpus, rank=device_id, shuffle=False) if num_gpus > 1 else None
