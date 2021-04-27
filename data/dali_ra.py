@@ -5,8 +5,8 @@ import pickle
 
 import lmdb
 import numpy as np
-import cupy
-from cupyx.scipy.signal import convolve2d
+#import cupy
+#from cupyx.scipy.signal import convolve2d
 
 from nvidia.dali.pipeline import Pipeline
 import nvidia.dali.types as types

@@ -20,7 +20,7 @@ from PIL import Image, ImageOps, ImageEnhance, ImageChops
 import PIL
 import numpy as np
 
-import imgaug.augmenters as iaa
+#import imgaug.augmenters as iaa
 
 
 _PIL_VER = tuple([int(x) for x in PIL.__version__.split('.')[:2]])
@@ -255,88 +255,88 @@ def _solarize_add_level_to_arg(level, _hparams):
 
 ###################################################################################################
 
-def shear_x_iaa(img, factor, **kwargs):
-    _check_args_tf(kwargs)
-    return iaa.ShearX(factor * 45.0).augment_image(img)
+# def shear_x_iaa(img, factor, **kwargs):
+#     _check_args_tf(kwargs)
+#     return iaa.ShearX(factor * 45.0).augment_image(img)
 
 
-def shear_y_iaa(img, factor, **kwargs):
-    _check_args_tf(kwargs)
-    return iaa.ShearY(factor * 45.0).augment_image(img)
+# def shear_y_iaa(img, factor, **kwargs):
+#     _check_args_tf(kwargs)
+#     return iaa.ShearY(factor * 45.0).augment_image(img)
 
 
-def translate_x_rel_iaa(img, pct, **kwargs):
-    pixels = int(pct * img.shape[1])
-    _check_args_tf(kwargs)
-    return iaa.TranslateX(px=pixels).augment_image(img)
+# def translate_x_rel_iaa(img, pct, **kwargs):
+#     pixels = int(pct * img.shape[1])
+#     _check_args_tf(kwargs)
+#     return iaa.TranslateX(px=pixels).augment_image(img)
 
 
-def translate_y_rel_iaa(img, pct, **kwargs):
-    pixels = int(pct * img.shape[0])
-    _check_args_tf(kwargs)
-    return iaa.TranslateY(px=pixels).augment_image(img)
+# def translate_y_rel_iaa(img, pct, **kwargs):
+#     pixels = int(pct * img.shape[0])
+#     _check_args_tf(kwargs)
+#     return iaa.TranslateY(px=pixels).augment_image(img)
 
 
-def translate_x_abs_iaa(img, pixels, **kwargs):
-    _check_args_tf(kwargs)
-    return iaa.TranslateX(px=pixels).augment_image(img)
+# def translate_x_abs_iaa(img, pixels, **kwargs):
+#     _check_args_tf(kwargs)
+#     return iaa.TranslateX(px=pixels).augment_image(img)
 
 
-def translate_y_abs_iaa(img, pixels, **kwargs):
-    _check_args_tf(kwargs)
-    return iaa.TranslateY(px=pixels).augment_image(img)
+# def translate_y_abs_iaa(img, pixels, **kwargs):
+#     _check_args_tf(kwargs)
+#     return iaa.TranslateY(px=pixels).augment_image(img)
 
-def rotate_iaa(img, degrees, **kwargs):
-    return iaa.geometric.Rotate(degrees).augment_image(img)
+# def rotate_iaa(img, degrees, **kwargs):
+#     return iaa.geometric.Rotate(degrees).augment_image(img)
 
-def auto_contrast_iaa(img, **__):
-    return iaa.pillike.Autocontrast().augment_image(img)
+# def auto_contrast_iaa(img, **__):
+#     return iaa.pillike.Autocontrast().augment_image(img)
 
-def invert_iaa(img, **__):
-    return iaa.arithmetic.Invert().augment_image(img)
+# def invert_iaa(img, **__):
+#     return iaa.arithmetic.Invert().augment_image(img)
 
-def equalize_iaa(img, **__):
-    return iaa.pillike.Equalize().augment_image(img)
+# def equalize_iaa(img, **__):
+#     return iaa.pillike.Equalize().augment_image(img)
 
-def solarize_iaa(img, thresh, **__):
-    return iaa.pillike.Solarize(threshold=thresh).augment_image(img)
+# def solarize_iaa(img, thresh, **__):
+#     return iaa.pillike.Solarize(threshold=thresh).augment_image(img)
 
 
-# def solarize_add(img, add, thresh=128, **__):
-#     lut = []
-#     for i in range(256):
-#         if i < thresh:
-#             lut.append(min(255, i + add))
-#         else:
-#             lut.append(i)
-#     if img.mode in ("L", "RGB"):
-#         if img.mode == "RGB" and len(lut) == 256:
-#             lut = lut + lut + lut
-#         return img.point(lut)
-#     else:
+# # def solarize_add(img, add, thresh=128, **__):
+# #     lut = []
+# #     for i in range(256):
+# #         if i < thresh:
+# #             lut.append(min(255, i + add))
+# #         else:
+# #             lut.append(i)
+# #     if img.mode in ("L", "RGB"):
+# #         if img.mode == "RGB" and len(lut) == 256:
+# #             lut = lut + lut + lut
+# #         return img.point(lut)
+# #     else:
+# #         return img
+
+
+# def posterize_iaa(img, bits_to_keep, **__):
+#     if bits_to_keep >= 8:
 #         return img
+#     return iaa.pillike.Posterize(bits_to_keep).augment_image(img)
 
 
-def posterize_iaa(img, bits_to_keep, **__):
-    if bits_to_keep >= 8:
-        return img
-    return iaa.pillike.Posterize(bits_to_keep).augment_image(img)
+# def contrast_iaa(img, factor, **__):
+#     return iaa.pillike.EnhanceContrast(factor).augment_image(img)
 
 
-def contrast_iaa(img, factor, **__):
-    return iaa.pillike.EnhanceContrast(factor).augment_image(img)
+# def color_iaa(img, factor, **__):
+#     return iaa.pillike.EnhanceColor(factor).augment_image(img)
 
 
-def color_iaa(img, factor, **__):
-    return iaa.pillike.EnhanceColor(factor).augment_image(img)
+# def brightness_iaa(img, factor, **__):
+#     return iaa.pillike.EnhanceBrightness(factor).augment_image(img)
 
 
-def brightness_iaa(img, factor, **__):
-    return iaa.pillike.EnhanceBrightness(factor).augment_image(img)
-
-
-def sharpness_iaa(img, factor, **__):
-    return iaa.pillike.EnhanceSharpness(factor).augment_image(img)
+# def sharpness_iaa(img, factor, **__):
+#     return iaa.pillike.EnhanceSharpness(factor).augment_image(img)
 
 
 LEVEL_TO_ARG = {
@@ -395,32 +395,32 @@ NAME_TO_OP = {
     'TranslateYRel': translate_y_rel,
 }
 
-NAME_TO_OP_IAA = {
-    'AutoContrast': auto_contrast_iaa,
-    'Equalize': equalize_iaa,
-    'Invert': invert_iaa,
-    'Rotate': rotate_iaa,
-    'Posterize': posterize_iaa,
-    'PosterizeIncreasing': posterize_iaa,
-    'PosterizeOriginal': posterize_iaa,
-    'Solarize': solarize_iaa,
-    'SolarizeIncreasing': solarize_iaa,
-    'SolarizeAdd': solarize_iaa,
-    'Color': color_iaa,
-    'ColorIncreasing': color_iaa,
-    'Contrast': contrast_iaa,
-    'ContrastIncreasing': contrast_iaa,
-    'Brightness': brightness_iaa,
-    'BrightnessIncreasing': brightness_iaa,
-    'Sharpness': sharpness_iaa,
-    'SharpnessIncreasing': sharpness_iaa,
-    'ShearX': shear_x_iaa,
-    'ShearY': shear_y_iaa,
-    'TranslateX': translate_x_abs_iaa,
-    'TranslateY': translate_y_abs_iaa,
-    'TranslateXRel': translate_x_rel_iaa,
-    'TranslateYRel': translate_y_rel_iaa,
-}
+# NAME_TO_OP_IAA = {
+#     'AutoContrast': auto_contrast_iaa,
+#     'Equalize': equalize_iaa,
+#     'Invert': invert_iaa,
+#     'Rotate': rotate_iaa,
+#     'Posterize': posterize_iaa,
+#     'PosterizeIncreasing': posterize_iaa,
+#     'PosterizeOriginal': posterize_iaa,
+#     'Solarize': solarize_iaa,
+#     'SolarizeIncreasing': solarize_iaa,
+#     'SolarizeAdd': solarize_iaa,
+#     'Color': color_iaa,
+#     'ColorIncreasing': color_iaa,
+#     'Contrast': contrast_iaa,
+#     'ContrastIncreasing': contrast_iaa,
+#     'Brightness': brightness_iaa,
+#     'BrightnessIncreasing': brightness_iaa,
+#     'Sharpness': sharpness_iaa,
+#     'SharpnessIncreasing': sharpness_iaa,
+#     'ShearX': shear_x_iaa,
+#     'ShearY': shear_y_iaa,
+#     'TranslateX': translate_x_abs_iaa,
+#     'TranslateY': translate_y_abs_iaa,
+#     'TranslateXRel': translate_x_rel_iaa,
+#     'TranslateYRel': translate_y_rel_iaa,
+# }
 
 
 class AugmentOp:
@@ -429,7 +429,7 @@ class AugmentOp:
         hparams = hparams or _HPARAMS_DEFAULT
         self.name = name
         self.mode = mode
-        self.aug_fn = NAME_TO_OP[name] if mode is None else NAME_TO_OP_IAA[name]
+        self.aug_fn = NAME_TO_OP[name] #if mode is None else NAME_TO_OP_IAA[name]
         self.level_fn = LEVEL_TO_ARG[name]
         self.prob = prob
         self.magnitude = magnitude

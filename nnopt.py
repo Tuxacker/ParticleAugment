@@ -146,7 +146,7 @@ def main(local_rank=-1, world_size=1, overrides=None):
 
     if config.distributed:
         logger.info("Using DDP")
-        model = DDP(model, device_ids=[config.device_id], output_device=config.device_id)
+        model = DDP(model, device_ids=[config.device_id], output_device=config.device_id, find_unused_parameters=config.model=="shake_shake")
 
     criterion = loss_from_config(config).to(config.device_id)
 

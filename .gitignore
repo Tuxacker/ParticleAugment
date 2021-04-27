@@ -62,3 +62,4 @@ venv.bak/
 [0-9]*/
 old/
 .vscode/
+*.simg
