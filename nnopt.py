@@ -36,7 +36,7 @@ from components.loss_factory import loss_from_config
 from components.optimizer_factory import optimizer_from_config
 from components.lrs_factory import lrs_from_config
 from data.dali_ra import get_lcra_train_iterator, get_lcra_val_iterator
-from data.pim_loader import get_cifar_10_train_loader, get_cifar_10_val_loader
+from data.pim_loader import get_train_loader, get_val_loader
 from data.pim_ra import RandAugment
 from utils.config_src import get_global_config
 
@@ -199,13 +199,13 @@ def main(local_rank=-1, world_size=1, overrides=None):
         fil_loader = DALIClassificationIterator(filp, last_batch_policy=LastBatchPolicy.PARTIAL, dynamic_shape=True, prepare_first_batch=False)
         #fil_iterator.name = "fil_iterator
     elif config.dataloader == "pim":
-        train_loader, train_iterator = get_cifar_10_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
+        train_loader, train_iterator = get_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
         if config.filter.extra_train:
-            filtrain_loader, filtrain_iterator = get_cifar_10_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads_pft, config.device_id, config.world_size, subset=list(range(config.batch_size*200)))
-        val_loader = get_cifar_10_val_loader(config, config.val_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
+            filtrain_loader, filtrain_iterator = get_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads_pft, config.device_id, config.world_size, subset=list(range(config.batch_size*200)))
+        val_loader = get_val_loader(config, config.val_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
         val_iterator = None
         indices = train_loader.dataset.get_balanced_subset(config.batch_size*4)
-        fil_loader, fil_iterator = get_cifar_10_train_loader(config, config.train_dataset_path, config.batch_size, 0, config.device_id, config.world_size, subset=indices)
+        fil_loader, fil_iterator = get_train_loader(config, config.train_dataset_path, config.batch_size, 0, config.device_id, config.world_size, subset=indices)
 
 
     if config.evaluate:

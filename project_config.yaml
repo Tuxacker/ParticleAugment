@@ -5,6 +5,7 @@ model_params:
   depth: 28
   width: 2
   dropout_rate: 0.0
+dataset: "cifar10"
 dataset_params:
   num_classes: 10
 optimizer_params:
@@ -53,4 +54,4 @@ tests:
   lmdb_dataset_path: "~/datasets/CIFAR/lmdb_dataset.lmdb"
   lmdb_val_dataset_path: "~/datasets/CIFAR/cifar10-val.lmdb"
 lmdb_export:
-  lmdb_dataset_dir: "~/datasets/CIFAR/"
+  lmdb_dataset_dir: "/share/Projects/Datasets/ImageNet/" #"~/datasets/CIFAR/"
