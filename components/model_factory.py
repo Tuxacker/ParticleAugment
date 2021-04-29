@@ -1,3 +1,4 @@
+from .resnet import ResNet
 from .wide_resnet import Wide_ResNet
 from .shake_resnet import ShakeResNet
 
@@ -22,6 +23,13 @@ def model_from_config(config):
         num_classes = config.dataset_params.num_classes
 
         return ShakeResNet(depth, width, num_classes)
+
+    elif config.model == "resnet":
+
+        depth = config.model_params.depth
+        num_classes = config.dataset_params.num_classes
+
+        return ResNet("imagenet", depth, num_classes, True)
 
     else:
         raise ValueError("{} is not a valid model identifier!".format(config.model))
