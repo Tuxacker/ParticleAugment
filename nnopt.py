@@ -98,8 +98,7 @@ def main(local_rank=-1, world_size=1, overrides=None):
     if 'MASTER_ADDR' not in os.environ:
         os.environ['MASTER_ADDR'] = "127.0.0.1"
 
-    if 'MASTER_PORT' not in os.environ:
-        os.environ['MASTER_PORT'] = str(config.port)
+    os.environ['MASTER_PORT'] = str(config.port)
 
     logger.info("CUDNN VERSION: {}".format(cudnn.version()))
 
