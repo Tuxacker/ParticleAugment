@@ -47,6 +47,7 @@ keep_epochs: 10
 debug_print_freq: 100
 validation_interval: 1
 dataloader: "pim"
+port: "2222"
 train_dataset_path: "~/datasets/CIFAR/lmdb_dataset.lmdb"
 val_dataset_path: "~/datasets/CIFAR/cifar10-val.lmdb"
 
