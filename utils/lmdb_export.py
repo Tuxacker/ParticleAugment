@@ -10,11 +10,12 @@ import lmdb
 import numpy as np
 from PIL import Image
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10, CIFAR100, ImageNet
+from torchvision.datasets import CIFAR10, CIFAR100
 from tqdm import tqdm
 
 from utils.config_src import get_global_config
 from utils.path_utils import get_fq_fpath, get_parent_dir, is_dir, join_paths
+from utils.modified_imagenet import ImageNet
 
 def export_classification_dataset(path, dataset, name="lmdb_dataset", write_frequency=5000, compress=False, limit=None):
     data_loader = DataLoader(dataset, num_workers=32, collate_fn=lambda x: x, shuffle=False)
@@ -32,14 +33,14 @@ def export_classification_dataset(path, dataset, name="lmdb_dataset", write_freq
             break
         image, label = data[0]
 
-        with io.BytesIO() as arr:
-            if compress:
-                if not type(image) == Image.Image:
-                    image = Image.fromarray(image)
-                image.save(arr, format="JPEG")
-            else:
+        if not compress:
+            with io.BytesIO() as arr:
                 np.save(arr, np.array(image, dtype=np.uint8))
-            txn.put("{}".format(idx).encode('ascii'), pickle.dumps((arr.getvalue(), label)))
+                txn.put("{}".format(idx).encode('ascii'), pickle.dumps((arr.getvalue(), label)))
+        else:
+            with open(image, "rb") as img:
+                arr = io.BytesIO(img.read())
+                txn.put("{}".format(idx).encode('ascii'), pickle.dumps((arr.getvalue(), label)))
 
         if idx % write_frequency == 0:
             txn.commit()
@@ -68,4 +69,4 @@ if __name__ == "__main__":
     elif sys.argv[1] == "imagenet":
         dataset = ImageNet(lmdb_dataset_dir, split=sys.argv[2])
         compress = True
-    export_classification_dataset(lmdb_dataset_dir, dataset, name=sys.argv[3], compress=compress)
+    export_classification_dataset(lmdb_dataset_dir, dataset, name=sys.argv[3], compress=compress, limit=10000)
