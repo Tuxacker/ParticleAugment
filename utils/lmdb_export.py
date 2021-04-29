@@ -69,4 +69,4 @@ if __name__ == "__main__":
     elif sys.argv[1] == "imagenet":
         dataset = ImageNet(lmdb_dataset_dir, split=sys.argv[2])
         compress = True
-    export_classification_dataset(lmdb_dataset_dir, dataset, name=sys.argv[3], compress=compress, limit=10000)
+    export_classification_dataset(lmdb_dataset_dir, dataset, name=sys.argv[3], compress=compress)
