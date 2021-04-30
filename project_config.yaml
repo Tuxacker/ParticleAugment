@@ -33,6 +33,7 @@ lr: 0.05
 epochs: 250
 ra_m: 5
 ra_n: 2
+disable_cutout: False
 ra_tf: "normal"
 resume: False
 evaluate: False
