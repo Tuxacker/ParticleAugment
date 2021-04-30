@@ -200,10 +200,10 @@ def main(local_rank=-1, world_size=1, overrides=None):
     elif config.dataloader == "pim":
         train_loader, train_iterator = get_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
         if config.filter.extra_train:
-            filtrain_loader, filtrain_iterator = get_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads_pft, config.device_id, config.world_size, subset=list(range(config.batch_size*200)))
+            filtrain_loader, filtrain_iterator = get_train_loader(config, config.train_dataset_path, config.batch_size, config.data_threads_pft, config.device_id, config.world_size, subset=list(range(config.batch_size * config.batch_size_t_mult)))
         val_loader = get_val_loader(config, config.val_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size)
         val_iterator = None
-        indices = train_loader.dataset.get_balanced_subset(config.batch_size*4)
+        indices = train_loader.dataset.get_balanced_subset(config.batch_size * config.batch_size_v_mult)
         fil_loader, fil_iterator = get_train_loader(config, config.train_dataset_path, config.batch_size, 0, config.device_id, config.world_size, subset=indices)
 
 

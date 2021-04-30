@@ -1,5 +1,7 @@
 deterministic: True
 batch_size: 128
+batch_size_t_mult: 200
+batch_size_v_mult: 4
 model: wide_resnet
 model_params:
   depth: 28
