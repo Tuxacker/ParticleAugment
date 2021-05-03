@@ -41,6 +41,7 @@ test: False
 amp: True
 profile: -1
 data_threads: 2
+pval_threads: 0
 data_threads_pft: 2
 retrain_on_val_loss: False
 num_retries: 2
