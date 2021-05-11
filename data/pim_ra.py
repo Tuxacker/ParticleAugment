@@ -666,6 +666,22 @@ _RAND_TRANSFORMS = [
     #'Cutout'  # NOTE I've implement this as random erasing separately
 ]
 
+_RAND_SVHN_TRANSFORMS = [
+    'AutoContrast',
+    'Equalize',
+    'Invert',
+    'Posterize',
+    'Solarize',
+    'SolarizeAdd',
+    'Color',
+    'Contrast',
+    'Brightness',
+    'Sharpness',
+    'ShearX',
+    'ShearY',
+    'TranslateYRel',
+    #'Cutout'  # NOTE I've implement this as random erasing separately
+]
 
 _RAND_INCREASING_TRANSFORMS = [
     'AutoContrast',
@@ -723,6 +739,9 @@ def rand_augment_ops(magnitude=10, hparams=None, transforms=None, p=0.5, mode=No
     transforms = transforms or _RAND_TRANSFORMS
     if config.ra_tf == "increasing":
         transforms = _RAND_INCREASING_TRANSFORMS
+    if config.dataset == "svhn":
+        # print("Using SVHN reduced augmentations")
+        transforms = _RAND_SVHN_TRANSFORMS
     return [AugmentOp(
         name, prob=p, magnitude=magnitude, mode=mode, hparams=hparams) for name in transforms]
 

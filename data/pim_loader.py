@@ -134,14 +134,14 @@ def get_imagenet_val_tf():
     ])
 
 def get_train_loader(config, path, batch_size, num_threads, device_id, num_gpus, subset=None, seed=0):
-    transform, ra_instance = get_cifar_10_train_tf(config) if config.dataset == "cifar10" else get_imagenet_train_tf(config)
+    transform, ra_instance = get_cifar_10_train_tf(config) if config.dataset == "cifar10" or config.dataset == "svhn" else get_imagenet_train_tf(config)
     dataset = ClassLMDB(path, transform, subset=subset, compressed=config.dataset=="imagenet")
     sampler = DistributedSampler(dataset, num_replicas=num_gpus, rank=device_id, seed=seed) if num_gpus > 1 else None
     shuffle = None if num_gpus > 1 else True
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_threads, pin_memory=True), ra_instance
 
 def get_val_loader(config, path, batch_size, num_threads, device_id, num_gpus):
-    transform = get_cifar_10_val_tf() if config.dataset == "cifar10" else get_imagenet_val_tf()
+    transform = get_cifar_10_val_tf() if config.dataset == "cifar10" or config.dataset == "svhn" else get_imagenet_val_tf()
     dataset = ClassLMDB(path, transform, compressed=config.dataset=="imagenet")
     sampler = DistributedSampler(dataset, num_replicas=num_gpus, rank=device_id, shuffle=False) if num_gpus > 1 else None
     return DataLoader(dataset, batch_size=batch_size, shuffle=False, sampler=sampler, num_workers=num_threads, pin_memory=True)

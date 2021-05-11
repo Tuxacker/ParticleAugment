@@ -10,7 +10,7 @@ import lmdb
 import numpy as np
 from PIL import Image
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10, CIFAR100
+from torchvision.datasets import CIFAR10, CIFAR100, SVHN
 from tqdm import tqdm
 
 from utils.config_src import get_global_config
@@ -69,4 +69,6 @@ if __name__ == "__main__":
     elif sys.argv[1] == "imagenet":
         dataset = ImageNet(lmdb_dataset_dir, split=sys.argv[2])
         compress = True
+    elif sys.argv[1] == "svhn":
+        dataset = SVHN(lmdb_dataset_dir, split=sys.argv[2])
     export_classification_dataset(lmdb_dataset_dir, dataset, name=sys.argv[3], compress=compress)

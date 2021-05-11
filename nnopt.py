@@ -7,7 +7,10 @@ import sys
 import time
 import logging
 import datetime
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings("ignore", ".*interpolation.*", UserWarning)
 
 import torch
 import torch.nn as nn
@@ -155,29 +158,6 @@ def main(local_rank=-1, world_size=1, overrides=None):
 
     scaler = amp.GradScaler() if config.amp else None
 
-    # Optionally resume from a checkpoint
-    if config.resume:
-        # Use a local scope to avoid dangling references
-        def resume():
-            if os.path.isfile(config.resume):
-                logger.info("=> loading checkpoint '{}'".format(config.resume))
-                checkpoint = torch.load(config.resume, map_location = lambda storage, loc: storage.cuda(config.device_id))
-                config.start_epoch = checkpoint['epoch']
-                global best_prec1
-                best_prec1 = checkpoint['best_prec1']
-                model.load_state_dict(checkpoint['state_dict'])
-                optimizer.load_state_dict(checkpoint['optimizer'])
-                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-                if checkpoint['scaler'] is not None:
-                    scaler.load_state_dict(checkpoint['scaler'])
-                logger.info("=> loaded checkpoint '{}' (epoch {})"
-                      .format(config.resume, checkpoint['epoch']))
-            else:
-                logger.info("=> no checkpoint found at '{}'".format(config.resume))
-        if config.distributed:
-            dist.barrier()
-        resume()
-
     # TODO: Maybe change DALI iterator reset trigger to config setting
     if config.dataloader == "dali":
         trainp, train_iterator = get_lcra_train_iterator(config.train_dataset_path, config.batch_size, config.data_threads, config.device_id, config.world_size, config.ra_m, last_batch_policy=LastBatchPolicy.PARTIAL, last_batch_padded=True)
@@ -208,12 +188,36 @@ def main(local_rank=-1, world_size=1, overrides=None):
         fil_loader, fil_iterator = get_train_loader(config, config.train_dataset_path, config.batch_size, config.pval_threads, config.device_id, config.world_size, subset=indices)
         logger.info("PF train size: {}, val size: {}".format(len(train_indices), len(indices)))
 
+    p_filter = ParticleFilter(model, train_iterator, fil_loader, fil_iterator, criterion)
+
+    # Optionally resume from a checkpoint
+    if config.resume:
+        # Use a local scope to avoid dangling references
+        def resume():
+            if os.path.isfile(config.resume):
+                logger.info("=> loading checkpoint '{}'".format(config.resume))
+                checkpoint = torch.load(config.resume, map_location = lambda storage, loc: storage.cuda(config.device_id))
+                config.start_epoch = checkpoint['epoch']
+                global best_prec1
+                best_prec1 = checkpoint['best_prec1']
+                model.load_state_dict(checkpoint['state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                if checkpoint['scaler'] is not None:
+                    scaler.load_state_dict(checkpoint['scaler'])
+                if checkpoint['pf'] is not None:
+                    p_filter.load_state_dict(checkpoint['pf'])
+                logger.info("=> loaded checkpoint '{}' (epoch {})"
+                      .format(config.resume, checkpoint['epoch']))
+            else:
+                logger.info("=> no checkpoint found at '{}'".format(config.resume))
+        if config.distributed:
+            dist.barrier()
+        resume()
 
     if config.evaluate:
         validate(val_loader, val_iterator, model, criterion)
         return
-
-    p_filter = ParticleFilter(model, train_iterator, fil_loader, fil_iterator, criterion)
 
     total_time = AverageMeter()
 
@@ -632,7 +636,13 @@ class ParticleFilter: #(ContextDecorator):
         self.test_loader = test_loader
         self.test_iter = test_iter
         self.loss = loss
-        self.n_states = 12 if config.dataloader == "dali" else 15
+        if config.dataloader == "dali":
+            self.n_states = 12
+        elif config.dataset == "svhn":
+            logger.info("Using reduced particle size for SVHN")
+            self.n_states = 13
+        else:
+            self.n_states = 15
         self.particles = np.zeros((config.filter.n_particles, self.n_states), dtype=np.float32)
         self.weights = np.ones(config.filter.n_particles, dtype=np.float32) / config.filter.n_particles
         self.rng = np.random.default_rng(seed)
