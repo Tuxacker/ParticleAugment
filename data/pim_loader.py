@@ -84,7 +84,7 @@ class ClassLMDB(Dataset):
 
 def get_cifar_10_train_tf(config):
     ops = rand_augment_ops(config=config)
-    ra_instance = RandAugment(ops, config.ra_n)
+    ra_instance = RandAugment(ops, config.ra_n, randomize=config.ra_randomize)
     return transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -106,7 +106,7 @@ def get_imagenet_train_tf(config):
             translate_const=int(224 * 0.45),
             img_mean=tuple([min(255, round(255 * x)) for x in (0.485, 0.456, 0.406)]),
         )
-    ops = rand_augment_ops(config=config, hparams=hparams)
+    ops = rand_augment_ops(config=config, hparams=hparams, randomize=config.ra_randomize)
     ra_instance = RandAugment(ops, config.ra_n)
     if disable_cutout:
         return transforms.Compose([

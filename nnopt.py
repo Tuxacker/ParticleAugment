@@ -642,7 +642,10 @@ class ParticleFilter: #(ContextDecorator):
             logger.info("Using reduced particle size for SVHN")
             self.n_states = 13
         else:
-            self.n_states = 15
+            if config.filter.dlength:
+                self.n_states = 30
+            else:
+                self.n_states = 15
         self.particles = np.zeros((config.filter.n_particles, self.n_states), dtype=np.float32)
         self.weights = np.ones(config.filter.n_particles, dtype=np.float32) / config.filter.n_particles
         self.rng = np.random.default_rng(seed)
@@ -650,6 +653,7 @@ class ParticleFilter: #(ContextDecorator):
         self.old_losses = np.zeros((config.filter.n_particles + 1), dtype=np.float32)
         self.new_losses = np.zeros((config.filter.n_particles + 1), dtype=np.float32)
         self.epoch = 0
+        self.enabled = True
 
     def state_dict(self):
         return {"particles": self.particles, "weights": self.weights, "n_states": self.n_states}
@@ -664,10 +668,14 @@ class ParticleFilter: #(ContextDecorator):
         for i in range(config.filter.n_particles):
             indices = self.rng.choice(self.n_states, config.ra_n, replace=False)
             for index in indices:
-                self.particles[i, index] = 0.5
+                self.particles[i, index] = config.filter.init_val
+        if config.filter.unit_vec_init:
+            self.particles[:self.n_states, :] = np.eye(self.n_states, dtype=np.float32)
 
     def add_noise(self):
          self.particles += self.rng.normal(0.0, config.filter.std, self.particles.shape)
+         if config.filter.velocity > 0:
+            self.particles -= config.filter.velocity
          self.particles = np.clip(self.particles, 0.0, 1.0)
 
     def nomalize_weights(self):
@@ -707,7 +715,7 @@ class ParticleFilter: #(ContextDecorator):
 
     def p_enter(self, epoch=0, enabled=True):
         self.epoch = epoch
-        if not enabled or self.epoch % config.filter.interval != 0:
+        if not self.enabled or not enabled or self.epoch % config.filter.interval != 0:
             return
         start = time.time()
         logger.info("Epoch: [{}/{}] Filter step part 1/2".format(self.epoch + 1, config.epochs))
@@ -723,7 +731,7 @@ class ParticleFilter: #(ContextDecorator):
         
     def p_exit(self, epoch=0, enabled=True):
         self.epoch = epoch
-        if not enabled or self.epoch % config.filter.interval != 0:
+        if not self.enabled or not enabled or self.epoch % config.filter.interval != 0:
             return
         start = time.time()
         logger.info("Epoch: [{}/{}] Filter step part 2/2".format(self.epoch + 1, config.epochs))
@@ -748,6 +756,8 @@ class ParticleFilter: #(ContextDecorator):
         else:
             self.train_iter.particles = self.particles
             self.train_iter.weights = self.weights
+            if config.filter.decouple:
+                self.enabled = False
         if self.epoch % config.filter.print_policies_every == 0:
             print_current_policies(self.particles, self.weights)
         logger.info("Epoch: [{}/{}] Filter step part 2/2 elapsed: {}".format(self.epoch + 1, config.epochs, time.time() - start))

@@ -747,7 +747,7 @@ def rand_augment_ops(magnitude=10, hparams=None, transforms=None, p=0.5, mode=No
 
 
 class RandAugment:
-    def __init__(self, ops, num_layers=2, choice_weights=None, particles=None, weights=None, seed=None):
+    def __init__(self, ops, num_layers=2, choice_weights=None, particles=None, weights=None, seed=None, randomize=False):
         self.ops = ops
         self.mode = ops[0].mode
         self.num_layers = num_layers
@@ -761,6 +761,7 @@ class RandAugment:
                 assert self.particles.shape[1] == len(self.ops)
                 assert self.weights != None
         self.rng = np.random.default_rng(seed)
+        self.randomize = randomize
 
     def __call__(self, img):
         if self.mode is not None:
@@ -772,17 +773,39 @@ class RandAugment:
             for op in ops:
                 img = op(img)
         else:
-            if self.particles.ndim == 1:
-                rnd = self.rng.random(self.particles.shape[0], dtype=self.particles.dtype) < self.particles
-                for op, apply in zip(self.ops, rnd):
-                    if apply:
-                        img = op(img)
+            if self.randomize:
+                permutation = self.rng.permutation(len(self.ops))
+                if self.particles.ndim != 1:
+                    index = self.rng.choice(len(self.weights), 1, p=self.weights)[0]
+                    rnd = self.rng.random(self.particles.shape[1], dtype=self.particles.dtype) < self.particles[index]
+                else:
+                    rnd = self.rng.random(self.particles.shape[0], dtype=self.particles.dtype) < self.particles
+                if len(self.ops) < len(rnd):
+                    rndlen2 = len(rnd) // 2
+                    for i in range(len(self.ops)):
+                        i = permutation[i]
+                        if rnd[i]:
+                            img = self.ops[i](img)
+                    rnd = rnd[rndlen2:]
+                for i in range(len(self.ops)):
+                    i = permutation[i]
+                    if rnd[i]:
+                        img = self.ops[i](img)
             else:
-                index = self.rng.choice(len(self.weights), 1, p=self.weights)[0]
-                rnd = self.rng.random(self.particles.shape[1], dtype=self.particles.dtype) < self.particles[index]
-                for op, apply in zip(self.ops, rnd):
-                    if apply:
-                        img = op(img)
+                if self.particles.ndim != 1:
+                    index = self.rng.choice(len(self.weights), 1, p=self.weights)[0]
+                    rnd = self.rng.random(self.particles.shape[1], dtype=self.particles.dtype) < self.particles[index]
+                else:
+                    rnd = self.rng.random(self.particles.shape[0], dtype=self.particles.dtype) < self.particles
+                if len(self.ops) < len(rnd):
+                    rndlen2 = len(rnd) // 2
+                    for i in range(len(self.ops)):
+                        if rnd[i]:
+                            img = self.ops[i](img)
+                    rnd = rnd[rndlen2:]
+                for i in range(len(self.ops)):
+                    if rnd[i]:
+                        img = self.ops[i](img)
         return img
 
     def get_op_statistics(self, show_called=False):
