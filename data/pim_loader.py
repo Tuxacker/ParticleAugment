@@ -106,8 +106,8 @@ def get_imagenet_train_tf(config):
             translate_const=int(224 * 0.45),
             img_mean=tuple([min(255, round(255 * x)) for x in (0.485, 0.456, 0.406)]),
         )
-    ops = rand_augment_ops(config=config, hparams=hparams, randomize=config.ra_randomize)
-    ra_instance = RandAugment(ops, config.ra_n)
+    ops = rand_augment_ops(config=config, hparams=hparams)
+    ra_instance = RandAugment(ops, config.ra_n, randomize=config.ra_randomize)
     if disable_cutout:
         return transforms.Compose([
             RandomResizedCropAndInterpolation(224),
